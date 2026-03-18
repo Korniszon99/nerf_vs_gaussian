@@ -1,0 +1,43 @@
+{% extends 'experiments/base.html' %}
+
+{% block content %}
+<h1>Porównanie Gaussian Splatting vs NeRF</h1>
+
+<div class="card">
+    <h2>Datasety</h2>
+    <table>
+        <thead><tr><th>Nazwa</th><th>Ścieżka</th><th>Liczba runów</th></tr></thead>
+        <tbody>
+        {% for dataset in datasets %}
+            <tr>
+                <td><a href="{% url 'experiments:dataset_detail' dataset.pk %}">{{ dataset.name }}</a></td>
+                <td><code>{{ dataset.data_path }}</code></td>
+                <td>{{ dataset.runs.count }}</td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="3">Brak datasetów.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Runy</h2>
+    <table>
+        <thead><tr><th>Nazwa</th><th>Pipeline</th><th>Status</th><th>Czas [s]</th></tr></thead>
+        <tbody>
+        {% for run in runs %}
+            <tr>
+                <td><a href="{% url 'experiments:run_detail' run.pk %}">{{ run.name }}</a></td>
+                <td>{{ run.pipeline_type }}</td>
+                <td class="status-{{ run.status }}">{{ run.get_status_display }}</td>
+                <td>{{ run.duration_seconds|default:'-' }}</td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="4">Brak runów.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+

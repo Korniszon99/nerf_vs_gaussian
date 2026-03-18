@@ -1,0 +1,42 @@
+{% extends 'experiments/base.html' %}
+
+{% block content %}
+<h1>Dataset: {{ dataset.name }}</h1>
+<p>{{ dataset.description }}</p>
+<p>Źródło danych dla Nerfstudio: <code>{{ dataset.data_path }}</code></p>
+
+<div class="card">
+    <h2>Dodaj zdjęcie + indeks klatki</h2>
+    <form method="post" enctype="multipart/form-data" action="{% url 'experiments:image_upload' dataset.pk %}">
+        {% csrf_token %}
+        {{ image_form.as_p }}
+        <button type="submit">Dodaj</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Zdjęcia i orientacja</h2>
+    <table>
+        <thead><tr><th>Klatka</th><th>Plik</th><th>Pose</th></tr></thead>
+        <tbody>
+        {% for image in images %}
+            <tr>
+                <td>{{ image.frame_index }}</td>
+                <td>{{ image.image_file.name }}</td>
+                <td>
+                    {% if image.pose %}
+                        t=({{ image.pose.tx }}, {{ image.pose.ty }}, {{ image.pose.tz }})
+                    {% else %}
+                        brak
+                    {% endif %}
+                    <a href="{% url 'experiments:pose_edit' image.pk %}">Edytuj</a>
+                </td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="3">Brak zdjęć.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+

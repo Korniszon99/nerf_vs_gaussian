@@ -1,0 +1,65 @@
+{% extends 'experiments/base.html' %}
+{% load static %}
+
+{% block content %}
+<h1>{{ run.name }}</h1>
+<p>Dataset: <a href="{% url 'experiments:dataset_detail' run.dataset.pk %}">{{ run.dataset.name }}</a></p>
+<p>Pipeline: <code>{{ run.pipeline_type }}</code></p>
+<p>Status: <strong class="status-{{ run.status }}">{{ run.get_status_display }}</strong></p>
+<p>Czas [s]: {{ run.duration_seconds|default:'-' }}</p>
+<p>Output dir: <code>{{ run.output_dir }}</code></p>
+
+<form method="post" action="{% url 'experiments:run_start' run.pk %}">
+    {% csrf_token %}
+    <button type="submit">Uruchom pipeline</button>
+</form>
+
+<div class="card">
+    <h2>Metryki</h2>
+    <table>
+        <thead><tr><th>Nazwa</th><th>Wartość</th><th>Step</th></tr></thead>
+        <tbody>
+        {% for metric in metrics %}
+            <tr><td>{{ metric.name }}</td><td>{{ metric.value }}</td><td>{{ metric.step }}</td></tr>
+        {% empty %}
+            <tr><td colspan="3">Brak metryk.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Artefakty</h2>
+    <table>
+        <thead><tr><th>Typ</th><th>Nazwa</th><th>Ścieżka</th></tr></thead>
+        <tbody>
+        {% for artifact in artifacts %}
+            <tr>
+                <td>{{ artifact.get_artifact_type_display }}</td>
+                <td>{{ artifact.label|default:'-' }}</td>
+                <td><code>{{ artifact.file_path }}</code></td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="3">Brak artefaktów.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Podgląd 3D chmury punktów</h2>
+    <div id="viewer" data-point-cloud-url="{{ cloud_url }}"></div>
+    <p>Obsługiwane formaty w viewerze: <code>.ply</code> (point cloud).</p>
+</div>
+
+<div class="card">
+    <h2>Logi</h2>
+    <h3>stdout</h3>
+    <pre>{{ run.stdout_log|default:'(brak)' }}</pre>
+    <h3>stderr</h3>
+    <pre>{{ run.stderr_log|default:'(brak)' }}</pre>
+</div>
+
+<script type="module" src="{% static 'experiments/js/viewer.js' %}"></script>
+{% endblock %}
+

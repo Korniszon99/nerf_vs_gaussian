@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>GS vs NeRF</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 24px; }
+        nav a { margin-right: 14px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+        th, td { border: 1px solid #ddd; padding: 8px; }
+        .status-pending { color: #9f7a00; }
+        .status-running { color: #0053ba; }
+        .status-success { color: #188038; }
+        .status-failed { color: #c5221f; }
+        .card { border: 1px solid #ddd; padding: 14px; margin-bottom: 16px; border-radius: 6px; }
+        #viewer { width: 100%; height: 420px; background: #0e1111; border-radius: 6px; }
+    </style>
+</head>
+<body>
+<nav>
+    <a href="{% url 'experiments:dashboard' %}">Dashboard</a>
+    <a href="{% url 'experiments:dataset_create' %}">Nowy dataset</a>
+    <a href="{% url 'experiments:run_create' %}">Nowy run</a>
+</nav>
+
+{% if messages %}
+    {% for message in messages %}
+        <p><strong>{{ message }}</strong></p>
+    {% endfor %}
+{% endif %}
+
+{% block content %}{% endblock %}
+</body>
+</html>
+
