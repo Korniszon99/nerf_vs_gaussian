@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
-import re
 import subprocess
 from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
 
-from experiments.models import Artifact, ExperimentRun, Metric
-
-METRIC_REGEX = re.compile(r"(?P<name>psnr|ssim|lpips)\s*[:=]\s*(?P<value>\d+\.?\d*)", re.IGNORECASE)
+from experiments.models import ExperimentRun, Metric
+from experiments.services.artifacts import collect_artifacts
+from experiments.services.metrics import collect_metrics
 
 
 class NerfstudioRunner:
@@ -34,8 +32,8 @@ class NerfstudioRunner:
 
         if result.returncode == 0:
             run.mark_finished(success=True)
-            self._collect_metrics(run)
-            self._collect_artifacts(run)
+            collect_metrics(run)
+            collect_artifacts(run)
         else:
             run.mark_finished(success=False, error_message="Nerfstudio zakończone błędem")
 
