@@ -1,0 +1,38 @@
+# IDE
+.idea/
+.vscode/
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Windows metadata
+*:Zone.Identifier
+
+# macOS
+.DS_Store
+
+# Environment variables
+.env
+.env.*
