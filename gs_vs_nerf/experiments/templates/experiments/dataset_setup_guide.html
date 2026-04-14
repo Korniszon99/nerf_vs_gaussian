@@ -1,0 +1,124 @@
+{% extends "experiments/base.html" %}
+
+{% block title %}Poradnik datasetu | GS vs NeRF{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-2">
+    <div>
+        <h1 class="h3 mb-1">Poradnik przygotowania datasetu</h1>
+        <p class="text-muted mb-0">Krok po kroku: od plików na dysku do gotowego datasetu w systemie.</p>
+    </div>
+    <a class="btn btn-outline-secondary" href="{% url 'experiments:dashboard' %}">Powrót do dashboardu</a>
+</div>
+
+<div class="alert alert-info" role="alert">
+    <strong>Nowy workflow:</strong> Wybierz folder z zdjęciami → system automatycznie importuje zdjęcia i przypisuje indeksy.
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h2 class="h5">Krok 1: Przygotuj strukturę folderów</h2>
+        <p class="mb-2">Zalecany layout (COLMAP):</p>
+        <pre class="bg-light border rounded p-3 mb-0"><code>gs_vs_nerf/
+  data/
+    ilza/
+      images/
+        IMG_0001.jpg
+        IMG_0002.jpg
+        ...
+      sparse/
+        0/
+          cameras.bin
+          images.bin
+          points3D.bin</code></pre>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h2 class="h5">Krok 2: Uporzadkuj nazwy zdjęć</h2>
+        <ul class="mb-0">
+            <li>Uzywaj prostych nazw bez spacji i bez znaków specjalnych (np. <code>IMG_0001.jpg</code>).</li>
+            <li>Preferuj <code>.jpg</code> lub <code>.png</code> (stabilniejszy pipeline niż <code>.tif</code>).</li>
+            <li>Nazwy powinny być spójne z rekonstrukcją COLMAP w <code>images.bin</code>.</li>
+        </ul>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h2 class="h5">Krok 3: Dodaj dataset w aplikacji (uproszczony widok)</h2>
+        <ol class="mb-3">
+            <li>Kliknij przycisk <strong>„Nowy dataset"</strong> na dashboardzie.</li>
+            <li>Wpisz nazwę, np. <code>Ilza</code>.</li>
+            <li>Wpisz ścieżkę do folderu zawierającego zdjęcia:
+                <div class="mt-2"><code>C:\Users\User\PycharmProjects\nerf_vs_gaussian\gs_vs_nerf\data\ilza</code></div>
+                <small class="text-muted">(System szuka <code>images/</code> wewnątrz folderu, a jeśli nie ma, to przeszukuje sam folder.)</small>
+            </li>
+            <li>Kliknij <strong>„Zapisz"</strong>.</li>
+            <li><strong>System automatycznie:</strong>
+                <ul>
+                    <li>Skanuje folder w poszukiwaniu zdjęć (.jpg, .png, .tif, itd.)</li>
+                    <li>Sortuje nazwy naturalnie (IMG_2 przed IMG_10)</li>
+                    <li>Przypisuje każdemu zdjęciu rosnący indeks (0, 1, 2, 3...)</li>
+                    <li>Importuje wszystko w jednym kroku</li>
+                </ul>
+            </li>
+        </ol>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h2 class="h5">Krok 4: Weryfikacja i dodatkowe akcje</h2>
+        <p class="mb-2">Po zapisie datasetu zobaczysz:</p>
+        <ul class="mb-3">
+            <li>Komunikat o liczbie zaimportowanych zdjęć.</li>
+            <li>Tabelę ze wszystkimi zdjęciami i ich indeksami.</li>
+        </ul>
+        <p class="mb-0"><strong>Opcjonalnie:</strong> jeśli dodam nowe zdjęcia do folderu, mogę kliknąć przycisk <strong>„Re-importuj zdjęcia z folderu"</strong>, aby dodać je bez duplikatów.</p>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h2 class="h5">Krok 5: Utworz run eksperymentu</h2>
+        <p class="mb-2">Gdy masz dataset z zdjęciami:</p>
+        <ol class="mb-2">
+            <li>Kliknij <strong>„Nowy run"</strong> na dashboardzie.</li>
+            <li>Wybierz dataset, pipeline (<code>vanilla-nerf</code> lub <code>vanilla-gaussian-splatting</code>).</li>
+            <li>Opcjonalnie podaj config (np. liczba iteracji, skalowanie).</li>
+            <li>Kliknij <strong>„Utwórz i uruchom"</strong>.</li>
+        </ol>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h2 class="h5">Krok 6: Monitoruj wynik</h2>
+        <ul class="mb-0">
+            <li>Status runa: <code>pending</code> → <code>running</code> → <code>success</code>/<code>failed</code>.</li>
+            <li>Po zakończeniu sprawdź metryki (psnr, ssim, lpips, duration_sec) i artefakty.</li>
+            <li>Viewer 3D prezentuje chmury punktów <code>.ply</code>.</li>
+        </ul>
+    </div>
+</div>
+
+<div class="card border-warning mb-4">
+    <div class="card-body">
+        <h2 class="h5 text-warning-emphasis">Najczęstsze problemy</h2>
+        <ul class="mb-0">
+            <li><strong>„Ścieżka nie istnieje":</strong> sprawdź, czy wpisana ścieżka na dysku faktycznie istnieje.</li>
+            <li><strong>„Brak zdjęć w katalogu":</strong> system szuka <code>images/</code> lub plików w głównym folderze. Upewnij się, że są tam zdjęcia.</li>
+            <li><strong>„Brak ns-train":</strong> ustaw zmienną środowiska <code>NERFSTUDIO_BIN</code>.</li>
+            <li><strong>Run failuje zaraz po starcie:</strong> sprawdź czy <code>data_path</code> zgadza się z layoutem COLMAP i czy nazwy plików są poprawne.</li>
+        </ul>
+    </div>
+</div>
+
+<div class="d-flex flex-wrap gap-2">
+    <a class="btn btn-primary" href="{% url 'experiments:dataset_create' %}">Dodaj dataset (auto-import)</a>
+    <a class="btn btn-success" href="{% url 'experiments:run_create' %}">Nowy run</a>
+</div>
+{% endblock %}
+

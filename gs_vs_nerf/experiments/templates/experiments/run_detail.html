@@ -1,64 +1,185 @@
 {% extends 'experiments/base.html' %}
 {% load static %}
 
+{% block title %}Run: {{ run.name }} | GS vs NeRF{% endblock %}
+
 {% block content %}
-<h1>{{ run.name }}</h1>
-<p>Dataset: <a href="{% url 'experiments:dataset_detail' run.dataset.pk %}">{{ run.dataset.name }}</a></p>
-<p>Pipeline: <code>{{ run.pipeline_type }}</code></p>
-<p>Status: <strong class="status-{{ run.status }}">{{ run.get_status_display }}</strong></p>
-<p>Czas [s]: {{ run.duration_seconds|default:'-' }}</p>
-<p>Output dir: <code>{{ run.output_dir }}</code></p>
-
-<form method="post" action="{% url 'experiments:run_start' run.pk %}">
-    {% csrf_token %}
-    <button type="submit">Uruchom pipeline</button>
-</form>
-
-<div class="card">
-    <h2>Metryki</h2>
-    <table>
-        <thead><tr><th>Nazwa</th><th>Wartość</th><th>Step</th></tr></thead>
-        <tbody>
-        {% for metric in metrics %}
-            <tr><td>{{ metric.name }}</td><td>{{ metric.value }}</td><td>{{ metric.step }}</td></tr>
-        {% empty %}
-            <tr><td colspan="3">Brak metryk.</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
+<div class="d-flex justify-content-between align-items-center mb-3 gap-2">
+    <div>
+        <h1 class="h3 mb-1">Run: {{ run.name }}</h1>
+        <p class="text-muted mb-0">
+            Dataset: <a href="{% url 'experiments:dataset_detail' run.dataset.pk %}">{{ run.dataset.name }}</a> |
+            Pipeline: <code>{{ run.pipeline_type }}</code>
+        </p>
+    </div>
+    <a href="{% url 'experiments:dashboard' %}" class="btn btn-outline-secondary btn-sm">Powrót</a>
 </div>
 
-<div class="card">
-    <h2>Artefakty</h2>
-    <table>
-        <thead><tr><th>Typ</th><th>Nazwa</th><th>Ścieżka</th></tr></thead>
-        <tbody>
-        {% for artifact in artifacts %}
-            <tr>
-                <td>{{ artifact.get_artifact_type_display }}</td>
-                <td>{{ artifact.label|default:'-' }}</td>
-                <td><code>{{ artifact.file_path }}</code></td>
-            </tr>
-        {% empty %}
-            <tr><td colspan="3">Brak artefaktów.</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
+<div class="alert alert-info">
+    <strong>Status:</strong>
+    <span class="badge bg-{% if run.status == 'running' %}warning{% elif run.status == 'success' %}success{% elif run.status == 'failed' %}danger{% else %}secondary{% endif %}">
+        {{ run.get_status_display }}
+    </span>
+    {% if run.status == 'running' %}
+        <span class="spinner-border spinner-border-sm ms-2" role="status" aria-hidden="true"></span>
+        <small class="ms-2">Strona odświeża się co 3 sekundy...</small>
+    {% endif %}
 </div>
 
-<div class="card">
-    <h2>Podgląd 3D chmury punktów</h2>
-    <div id="viewer" data-point-cloud-url="{{ cloud_url }}"></div>
-    <p>Obsługiwane formaty w viewerze: <code>.ply</code> (point cloud).</p>
+<div class="row mb-3">
+    <div class="col-md-3">
+        <div class="card bg-light">
+            <div class="card-body">
+                <small class="text-muted">Czas [s]</small>
+                <div class="h4 mb-0">{{ run.duration_seconds|default:'-' }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-light">
+            <div class="card-body">
+                <small class="text-muted">Metryki</small>
+                <div class="h4 mb-0">{{ metrics.count }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-light">
+            <div class="card-body">
+                <small class="text-muted">Artefakty</small>
+                <div class="h4 mb-0">{{ artifacts.count }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        {% if run.status == 'pending' %}
+            <form method="post" action="{% url 'experiments:run_start' run.pk %}" style="display: inline;">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-success w-100">Uruchom pipeline</button>
+            </form>
+        {% endif %}
+    </div>
 </div>
 
-<div class="card">
-    <h2>Logi</h2>
-    <h3>stdout</h3>
-    <pre>{{ run.stdout_log|default:'(brak)' }}</pre>
-    <h3>stderr</h3>
-    <pre>{{ run.stderr_log|default:'(brak)' }}</pre>
+<div class="card mb-3">
+    <div class="card-header">
+        <h2 class="h5 mb-0">Logi (live)</h2>
+    </div>
+    <div class="card-body">
+        <div class="mb-3">
+            <h6>Stdout:</h6>
+            <pre id="stdout-log" class="bg-dark text-light p-2 rounded" style="max-height: 300px; overflow-y: auto;">{{ run.stdout_log|default:'(czekam na dane)' }}</pre>
+        </div>
+        <div>
+            <h6>Stderr:</h6>
+            <pre id="stderr-log" class="bg-danger text-light p-2 rounded" style="max-height: 300px; overflow-y: auto;">{{ run.stderr_log|default:'(brak błędów)' }}</pre>
+        </div>
+    </div>
 </div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h2 class="h5 mb-0">Metryki</h2>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr><th>Nazwa</th><th>Wartość</th><th>Step</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for metric in metrics %}
+                        <tr>
+                            <td><code>{{ metric.name }}</code></td>
+                            <td><strong>{{ metric.value|floatformat:4 }}</strong></td>
+                            <td>{{ metric.step }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="3" class="text-center text-muted">Brak metryk</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h2 class="h5 mb-0">Artefakty</h2>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr><th>Typ</th><th>Nazwa</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for artifact in artifacts %}
+                        <tr>
+                            <td><span class="badge bg-info">{{ artifact.get_artifact_type_display }}</span></td>
+                            <td><small>{{ artifact.label|default:'-' }}</small></td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="2" class="text-center text-muted">Brak artefaktów</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header">
+        <h2 class="h5 mb-0">Podgląd 3D (Point Cloud)</h2>
+    </div>
+    <div class="card-body">
+        {% if cloud_url %}
+            <div id="viewer" data-point-cloud-url="{{ cloud_url }}" style="width:100%; height:400px;"></div>
+        {% else %}
+            <p class="text-muted">Czekam na artefakt .ply...</p>
+        {% endif %}
+    </div>
+</div>
+
+<script type="module">
+    // Auto-refresh logów co 3 sekundy jeśli run jest running
+    function refreshLogs() {
+        const runId = {{ run.pk }};
+        const isRunning = document.querySelector('[data-run-status]')?.dataset.runStatus === 'running'
+            || '{{ run.status }}'.toLowerCase() === 'running';
+
+        if (!isRunning) return; // Stop refreshing jeśli nie running
+
+        fetch(`{% url 'experiments:run_logs_json' run.pk %}`)
+            .then(r => r.json())
+            .then(data => {
+                // Update logi
+                const stdoutEl = document.getElementById('stdout-log');
+                const stderrEl = document.getElementById('stderr-log');
+                if (data.stdout) stdoutEl.textContent = data.stdout;
+                if (data.stderr) stderrEl.textContent = data.stderr;
+
+                // Scroll do dołu
+                stdoutEl.scrollTop = stdoutEl.scrollHeight;
+                stderrEl.scrollTop = stderrEl.scrollHeight;
+
+                // Refresh za 3 sekundy
+                if (data.status === 'running') {
+                    setTimeout(refreshLogs, 3000);
+                } else {
+                    // Refresh page jeśli skończony
+                    location.reload();
+                }
+            })
+            .catch(err => console.error('Błąd refreshu:', err));
+    }
+
+    // Start auto-refresh
+    if ('{{ run.status }}' === 'running') {
+        refreshLogs();
+    }
+</script>
 
 <script type="module" src="{% static 'experiments/js/viewer.js' %}"></script>
 {% endblock %}

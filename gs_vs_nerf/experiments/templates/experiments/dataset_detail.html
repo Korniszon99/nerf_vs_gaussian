@@ -1,42 +1,92 @@
 {% extends 'experiments/base.html' %}
 
-{% block content %}
-<h1>Dataset: {{ dataset.name }}</h1>
-<p>{{ dataset.description }}</p>
-<p>Źródło danych dla Nerfstudio: <code>{{ dataset.data_path }}</code></p>
+{% block title %}Dataset: {{ dataset.name }} | GS vs NeRF{% endblock %}
 
-<div class="card">
-    <h2>Dodaj zdjęcie + indeks klatki</h2>
-    <form method="post" enctype="multipart/form-data" action="{% url 'experiments:image_upload' dataset.pk %}">
-        {% csrf_token %}
-        {{ image_form.as_p }}
-        <button type="submit">Dodaj</button>
-    </form>
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 gap-2">
+    <div>
+        <h1 class="h3 mb-1">Dataset: {{ dataset.name }}</h1>
+        <p class="text-muted mb-0">{{ dataset.description }}</p>
+    </div>
+    <a href="{% url 'experiments:dashboard' %}" class="btn btn-outline-secondary btn-sm">Powrót</a>
+</div>
+
+<div class="alert alert-info">
+    <strong>Ścieżka:</strong> <code>{{ dataset.data_path }}</code>
+    (dla Nerfstudio: <code>ns-train ... --data {{ dataset.data_path }}</code>)
+</div>
+
+<div class="card mb-3">
+    <div class="card-header">
+        <h2 class="h5 mb-0">Zarządzanie zdjęciami</h2>
+    </div>
+    <div class="card-body">
+        <p class="mb-3 text-muted">Opcja 1: Re-importuj zdjęcia z folderu (auto-indeks)</p>
+        <form method="post" action="{% url 'experiments:dataset_reimport_images' dataset.pk %}" style="display: inline;">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-success btn-sm">Re-importuj zdjęcia z folderu</button>
+        </form>
+
+        <hr class="my-3">
+
+        <p class="mb-3 text-muted">Opcja 2: Dodaj ręcznie jedno zdjęcie</p>
+        <form method="post" enctype="multipart/form-data" action="{% url 'experiments:image_upload' dataset.pk %}">
+            {% csrf_token %}
+            <div class="row g-2">
+                <div class="col-auto">
+                    {{ image_form.image_file }}
+                </div>
+                <div class="col-auto">
+                    {{ image_form.frame_index }}
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-primary btn-sm">Dodaj zdjęcie</button>
+                </div>
+            </div>
+        </form>
+    </div>
 </div>
 
 <div class="card">
-    <h2>Zdjęcia i orientacja</h2>
-    <table>
-        <thead><tr><th>Klatka</th><th>Plik</th><th>Pose</th></tr></thead>
-        <tbody>
-        {% for image in images %}
-            <tr>
-                <td>{{ image.frame_index }}</td>
-                <td>{{ image.image_file.name }}</td>
-                <td>
-                    {% if image.pose %}
-                        t=({{ image.pose.tx }}, {{ image.pose.ty }}, {{ image.pose.tz }})
-                    {% else %}
-                        brak
-                    {% endif %}
-                    <a href="{% url 'experiments:pose_edit' image.pk %}">Edytuj</a>
-                </td>
-            </tr>
-        {% empty %}
-            <tr><td colspan="3">Brak zdjęć.</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
+    <div class="card-header">
+        <h2 class="h5 mb-0">Zdjęcia i orientacja kamer ({{ images.count }} zdjęć)</h2>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-sm mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Indeks</th>
+                    <th>Plik</th>
+                    <th>Orientacja (t_xyz)</th>
+                    <th>Akcje</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for image in images %}
+                <tr>
+                    <td>
+                        <span class="badge bg-secondary">{{ image.frame_index }}</span>
+                    </td>
+                    <td>{{ image.image_file.name }}</td>
+                    <td>
+                        {% if image.pose %}
+                            <code>({{ image.pose.tx|floatformat:2 }}, {{ image.pose.ty|floatformat:2 }}, {{ image.pose.tz|floatformat:2 }})</code>
+                        {% else %}
+                            <span class="text-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{% url 'experiments:pose_edit' image.pk %}" class="btn btn-outline-primary btn-xs">Edytuj pose</a>
+                    </td>
+                </tr>
+            {% empty %}
+                <tr>
+                    <td colspan="4" class="text-center text-muted py-3">Brak zdjęć. Użyj przycisku „Re-importuj zdjęcia z folderu" powyżej.</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endblock %}
 

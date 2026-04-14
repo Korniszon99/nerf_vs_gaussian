@@ -8,6 +8,7 @@ from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_POST
+from django.views.generic import TemplateView
 
 from .forms import CameraPoseForm, DatasetForm, ExperimentRunForm, ImageFrameForm
 from .models import Artifact, CameraPose, Dataset, ExperimentRun, ImageFrame
@@ -25,7 +26,20 @@ def dataset_create(request):
         form = DatasetForm(request.POST)
         if form.is_valid():
             dataset = form.save()
-            messages.success(request, "Dataset zapisany.")
+            # Auto-importuj zdjęcia z folderu
+            from experiments.services.dataset_import import import_images_from_folder
+            result = import_images_from_folder(dataset)
+
+            messages.success(
+                request,
+                f"Dataset '{dataset.name}' zapisany. "
+                f"Zaimportowano {result['imported']} zdjęć."
+            )
+            if result["skipped"]:
+                messages.info(request, f"Pominięto {len(result['skipped'])} plików.")
+            if result["errors"]:
+                for error in result["errors"][:3]:  # Pokaż max 3 błędy
+                    messages.error(request, f"Błąd: {error}")
             return redirect("experiments:dataset_detail", pk=dataset.pk)
     else:
         form = DatasetForm()
@@ -131,14 +145,37 @@ def run_artifacts_json(request, pk: int):
     return JsonResponse({"artifacts": payload})
 
 
-def artifact_to_media_url(artifact: Artifact | None) -> str:
-    if not artifact:
-        return ""
-    path = Path(artifact.file_path)
-    media_root = Path(settings.MEDIA_ROOT)
-    try:
-        rel = path.relative_to(media_root)
-    except ValueError as exc:
-        raise Http404("Artifact nie jest pod MEDIA_ROOT") from exc
-    return f"{settings.MEDIA_URL}{rel.as_posix()}"
+def run_logs_json(request, pk: int):
+    """Zwraca live stdout/stderr runa w JSON (do auto-refresh)."""
+    run = get_object_or_404(ExperimentRun, pk=pk)
+    return JsonResponse({
+        "status": run.status,
+        "stdout": run.stdout_log,
+        "stderr": run.stderr_log,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "duration_seconds": run.duration_seconds,
+    })
+
+
+@require_POST
+def dataset_reimport_images(request, pk: int):
+    """Re-importuj zdjęcia z folderu datasetu."""
+    dataset = get_object_or_404(Dataset, pk=pk)
+    from experiments.services.dataset_import import import_images_from_folder
+    result = import_images_from_folder(dataset)
+
+    messages.success(request, f"Zaimportowano {result['imported']} nowych zdjęć.")
+    if result["skipped"]:
+        messages.info(request, f"Pominięto {len(result['skipped'])} plików (duplikaty lub nieznane rozszerzenia).")
+    if result["errors"]:
+        for error in result["errors"][:3]:
+            messages.error(request, f"Błąd: {error}")
+
+    return redirect("experiments:dataset_detail", pk=dataset.pk)
+
+
+class DatasetSetupGuideView(TemplateView):
+    """Prezentacyjny poradnik przygotowania datasetu pod pipeline Nerfstudio."""
+
+    template_name = "experiments/dataset_setup_guide.html"
 

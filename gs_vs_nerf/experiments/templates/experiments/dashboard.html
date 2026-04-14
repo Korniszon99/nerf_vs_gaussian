@@ -1,6 +1,17 @@
 {% extends 'experiments/base.html' %}
 
+{% block title %}Dashboard | GS vs NeRF{% endblock %}
+
 {% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+    <h1 class="h3 mb-0">Dashboard eksperymentow</h1>
+    <div class="d-flex flex-wrap gap-2">
+        <a class="btn btn-outline-info" href="{% url 'experiments:dataset_setup_guide' %}">Poradnik: dataset krok po kroku</a>
+        <a class="btn btn-outline-primary" href="{% url 'experiments:dataset_create' %}">Nowy dataset</a>
+        <a class="btn btn-primary" href="{% url 'experiments:run_create' %}">Nowy run</a>
+    </div>
+</div>
+
 <h1>Porównanie Gaussian Splatting vs NeRF</h1>
 
 <div class="card">
@@ -40,4 +51,3 @@
     </table>
 </div>
 {% endblock %}
-
