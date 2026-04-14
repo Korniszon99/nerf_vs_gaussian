@@ -15,6 +15,15 @@ from .models import Artifact, CameraPose, Dataset, ExperimentRun, ImageFrame
 from .tasks import launch_run_async
 
 
+def artifact_to_media_url(artifact: Artifact) -> str:
+    """Convert an artifact's absolute file_path to a MEDIA_URL-relative URL."""
+    try:
+        rel = Path(artifact.file_path).relative_to(settings.MEDIA_ROOT)
+        return settings.MEDIA_URL + str(rel).replace("\\", "/")
+    except ValueError:
+        return ""
+
+
 def dashboard(request):
     datasets = Dataset.objects.all()[:10]
     runs = ExperimentRun.objects.select_related("dataset").all()[:15]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from pathlib import Path
 
 from django.conf import settings
@@ -25,13 +26,16 @@ class NerfstudioRunner:
         Flow:
         1. Ustaw status=running, started_at=now()
         2. Uruchom subprocess z Popen (nie run())
-        3. Stream stdout/stderr linia po linii
+        3. Czytaj stdout/stderr równolegle (wątki) — unikamy deadlocka przy pełnych buforach
         4. Po zakończeniu: finished_at, duration, metryki, artefakty
         """
         output_base = Path(settings.MEDIA_ROOT) / "runs"
         output_base.mkdir(parents=True, exist_ok=True)
 
         run.ensure_output_dir(output_base)
+        # Utwórz katalog wyjściowy przed uruchomieniem procesu
+        Path(run.output_dir).mkdir(parents=True, exist_ok=True)
+
         command = self._build_command(run)
         run.command = " ".join(command)
         run.mark_running()
@@ -39,11 +43,10 @@ class NerfstudioRunner:
 
         logger.info(f"[Run {run.pk}] Uruchamiam: {' '.join(command)}")
 
-        stdout_lines = []
-        stderr_lines = []
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
 
         try:
-            # Uruchom process asynchronicznie
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
@@ -52,23 +55,30 @@ class NerfstudioRunner:
                 bufsize=1,  # Line buffered
             )
 
-            # Stream stdout
-            if process.stdout:
+            # Czytaj stdout i stderr równolegle żeby uniknąć deadlocka przy pełnych buforach
+            def _drain_stdout() -> None:
+                assert process.stdout is not None
                 for line in iter(process.stdout.readline, ""):
                     if line:
                         stdout_lines.append(line)
                         logger.debug(f"[Run {run.pk}] STDOUT: {line.rstrip()}")
-                        # Zapisz co 10 linii
                         if len(stdout_lines) % 10 == 0:
                             run.stdout_log = "".join(stdout_lines)
                             run.save(update_fields=["stdout_log"])
 
-            # Stream stderr
-            if process.stderr:
+            def _drain_stderr() -> None:
+                assert process.stderr is not None
                 for line in iter(process.stderr.readline, ""):
                     if line:
                         stderr_lines.append(line)
                         logger.debug(f"[Run {run.pk}] STDERR: {line.rstrip()}")
+
+            t_out = threading.Thread(target=_drain_stdout, daemon=True)
+            t_err = threading.Thread(target=_drain_stderr, daemon=True)
+            t_out.start()
+            t_err.start()
+            t_out.join()
+            t_err.join()
 
             returncode = process.wait()
             run.stdout_log = "".join(stdout_lines)
@@ -116,8 +126,8 @@ class NerfstudioRunner:
             run.dataset.data_path,
             "--output-dir",
             run.output_dir,
-            "--viewer.quit-on-train-completion",
-            "True",
+            "--vis",
+            "none",  # Wyłącz viewer — nie potrzebny w trybie batch
         ]
 
         if "max_num_iterations" in cfg:
@@ -127,5 +137,3 @@ class NerfstudioRunner:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
 
         return cmd
-
-
