@@ -422,7 +422,9 @@ def _with_skip_image_processing_flag(command: list[str]) -> list[str]:
 
 def _looks_like_ffmpeg_processing_failure(completed: subprocess.CompletedProcess[str]) -> bool:
     """Return True when ns-process-data output indicates an ffmpeg command failure."""
-    failure_output = f"{completed.stderr}\n{completed.stdout}".lower()
+    stderr_text = completed.stderr or ""
+    stdout_text = completed.stdout or ""
+    failure_output = (stderr_text + "\n" + stdout_text).lower()
     return "ffmpeg" in failure_output and "error running command" in failure_output
 
 
