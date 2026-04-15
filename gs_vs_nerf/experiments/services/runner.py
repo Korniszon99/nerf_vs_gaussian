@@ -184,7 +184,7 @@ class NerfstudioRunner:
         logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
 
     def _validate_pipeline_metadata(self, run: ExperimentRun, dataset_path: Path) -> None:
-        """Validate metadata files required by selected Nerfstudio pipeline."""
+        """Validate pipeline-specific metadata; raise ValueError when required files are missing."""
         raw_pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
         pipeline = self._NS_TRAIN_METHOD_MAP.get(raw_pipeline, raw_pipeline)
 
