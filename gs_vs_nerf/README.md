@@ -148,8 +148,8 @@ gs_vs_nerf/
   data/
     ilza/
       images/
-        IMG_0001.jpg
-        IMG_0002.jpg
+        IMG_0001.tif
+        IMG_0002.tif
         ...
       sparse/
         0/
@@ -160,7 +160,7 @@ gs_vs_nerf/
 
 Uwagi praktyczne:
 - Uzywaj prostych nazw plikow bez spacji i bez polskich znakow.
-- Rozszerzenia `.jpg`/`.png` sa zazwyczaj bezpieczniejsze dla pipeline'u niz surowe `.tif`.
+- Dla datasetu `Iłża` obrazy sa w formacie `.tif` i taki layout jest wspierany.
 - Nazwy obrazow w `images.bin` musza odpowiadac fizycznym plikom w `images/`.
 
 ## Dostosowanie datasetu `Iłża`

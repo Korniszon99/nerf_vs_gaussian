@@ -225,7 +225,7 @@ class NerfstudioRunner:
         ]
 
         if "max_num_iterations" in cfg:
-            cmd.extend(["--max-num-iterations", str(cfg["max_num_iterations"])])
+            cmd.extend(["--trainer.max-num-iterations", str(cfg["max_num_iterations"])])
 
         if "downscale_factor" in cfg:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
@@ -242,4 +242,3 @@ class NerfstudioRunner:
             return resolved
 
         return self.bin_name
-
