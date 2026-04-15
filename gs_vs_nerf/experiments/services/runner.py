@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 class NerfstudioRunner:
+    _BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
+
     def __init__(self) -> None:
         self.bin_name = getattr(settings, "NERFSTUDIO_BIN", "ns-train")
 
@@ -170,6 +172,14 @@ class NerfstudioRunner:
                 f"Dataset contains no images. Checked: {images_dir} and root of {dataset_path}"
             )
 
+        if not self._has_blender_layout(dataset_path) and not self._has_colmap_layout(dataset_path):
+            expected = ", ".join(self._BLENDER_SPLIT_FILES)
+            raise ValueError(
+                "Dataset layout is not compatible with Nerfstudio. "
+                f"Expected Blender files ({expected}) in {dataset_path} "
+                f"or COLMAP reconstruction in {dataset_path / 'sparse' / '0'} (see README)."
+            )
+
         logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
 
     def _normalize_dataset_path(self, raw_path: str) -> str:
@@ -230,7 +240,29 @@ class NerfstudioRunner:
         if "downscale_factor" in cfg:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
 
+        dataparser_type = self._resolve_dataparser_type(run, Path(run.dataset.data_path))
+        if dataparser_type:
+            cmd.extend(["--pipeline.datamanager.dataparser-type", dataparser_type])
+
         return cmd
+
+    def _resolve_dataparser_type(self, run: ExperimentRun, dataset_path: Path) -> str | None:
+        cfg = run.config_json or {}
+        explicit = cfg.get("dataparser_type") or cfg.get("dataparser")
+        if explicit:
+            return str(explicit)
+
+        if self._has_colmap_layout(dataset_path):
+            return "nerfstudio-data"
+
+        return None
+
+    def _has_blender_layout(self, dataset_path: Path) -> bool:
+        return all((dataset_path / file_name).is_file() for file_name in self._BLENDER_SPLIT_FILES)
+
+    def _has_colmap_layout(self, dataset_path: Path) -> bool:
+        sparse_root = dataset_path / "sparse" / "0"
+        return sparse_root.is_dir()
 
     def _resolve_binary(self) -> str:
         candidate = Path(self.bin_name)

@@ -65,6 +65,28 @@ class RunnerBuildCommandTests(TestCase):
         self.assertIn("--pipeline.datamanager.camera-res-scale-factor", cmd)
         self.assertIn("2", cmd)
 
+    def test_build_command_auto_sets_nerfstudio_dataparser_for_colmap_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            (tmp_path / "images").mkdir()
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
+            self.dataset.data_path = str(tmp_path)
+            self.dataset.save(update_fields=["data_path"])
+
+            with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
+                cmd = NerfstudioRunner()._build_command(self.run)
+
+        self.assertIn("--pipeline.datamanager.dataparser-type", cmd)
+        self.assertIn("nerfstudio-data", cmd)
+
+    def test_build_command_uses_explicit_dataparser_from_config(self) -> None:
+        self.run.config_json = {"dataparser_type": "blender-data"}
+        with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
+            cmd = NerfstudioRunner()._build_command(self.run)
+
+        parser_flag_index = cmd.index("--pipeline.datamanager.dataparser-type")
+        self.assertEqual(cmd[parser_flag_index + 1], "blender-data")
+
     def test_normalize_dataset_path_keeps_windows_absolute_path(self) -> None:
         runner = NerfstudioRunner()
         normalized = runner._normalize_dataset_path(r"C:\datasets\scene one")
@@ -146,6 +168,7 @@ class DatasetValidationTests(TestCase):
             images_dir = tmp_path / "images"
             images_dir.mkdir()
             (images_dir / "frame_001.jpg").write_text("fake image")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="valid-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -162,6 +185,7 @@ class DatasetValidationTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             (tmp_path / "frame_001.png").write_text("fake image")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="root-images-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -182,6 +206,7 @@ class DatasetValidationTests(TestCase):
             images_dir = dataset_dir / "images"
             images_dir.mkdir()
             (images_dir / "zdjęcie_001.tif").write_text("fake image")
+            (dataset_dir / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="polish-dataset", data_path=str(dataset_dir))
             run = ExperimentRun.objects.create(
@@ -219,6 +244,7 @@ class DatasetValidationTests(TestCase):
             (images_dir / "test.png").write_text("png")
             (images_dir / "test.tif").write_text("tif")
             (images_dir / "test.exr").write_text("exr")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="multi-format-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -229,6 +255,26 @@ class DatasetValidationTests(TestCase):
 
             # Should not raise
             self.runner._validate_dataset_path(run)
+
+    def test_validate_dataset_path_rejects_missing_blender_and_colmap_layout(self) -> None:
+        """Walidacja odrzuca katalog ze zdjęciami bez layoutu Blender lub COLMAP."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            images_dir.mkdir()
+            (images_dir / "frame_001.jpg").write_text("fake image")
+
+            dataset = Dataset.objects.create(name="unsupported-layout", data_path=str(tmp_path))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                self.runner._validate_dataset_path(run)
+
+            self.assertIn("not compatible", str(ctx.exception))
 
 
 class RunnerExecutionTests(TestCase):
