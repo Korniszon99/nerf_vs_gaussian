@@ -246,10 +246,6 @@ class NerfstudioRunner:
         if "downscale_factor" in cfg:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
 
-        dataparser_type = self._resolve_dataparser_type(run, Path(run.dataset.data_path))
-        if dataparser_type:
-            cmd.extend(["--pipeline.datamanager.dataparser-type", dataparser_type])
-
         return cmd
 
     def _resolve_dataparser_type(self, run: ExperimentRun, dataset_path: Path) -> str | None:

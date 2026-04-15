@@ -67,7 +67,7 @@ class RunnerBuildCommandTests(TestCase):
         self.assertIn("--pipeline.datamanager.camera-res-scale-factor", cmd)
         self.assertIn("2", cmd)
 
-    def test_auto_selects_nerfstudio_dataparser_for_colmap(self) -> None:
+    def test_does_not_add_dataparser_flag_for_colmap(self) -> None:
         runner = NerfstudioRunner()
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -79,17 +79,17 @@ class RunnerBuildCommandTests(TestCase):
             with patch.object(runner, "_resolve_binary", return_value="ns-train"):
                 cmd = runner._build_command(self.run)
 
-        self.assertIn("--pipeline.datamanager.dataparser-type", cmd)
-        self.assertIn("nerfstudio-data", cmd)
+        self.assertNotIn("--pipeline.datamanager.dataparser-type", cmd)
+        self.assertNotIn("nerfstudio-data", cmd)
 
-    def test_build_command_uses_explicit_dataparser_from_config(self) -> None:
+    def test_build_command_ignores_explicit_dataparser_from_config(self) -> None:
         self.run.config_json = {"dataparser_type": "blender-data"}
         runner = NerfstudioRunner()
         with patch.object(runner, "_resolve_binary", return_value="ns-train"):
             cmd = runner._build_command(self.run)
 
-        parser_flag_index = cmd.index("--pipeline.datamanager.dataparser-type")
-        self.assertEqual(cmd[parser_flag_index + 1], "blender-data")
+        self.assertNotIn("--pipeline.datamanager.dataparser-type", cmd)
+        self.assertNotIn("blender-data", cmd)
 
     def test_build_command_maps_vanilla_gs_to_splatfacto(self) -> None:
         """vanilla-gaussian-splatting must be translated to splatfacto for ns-train."""
