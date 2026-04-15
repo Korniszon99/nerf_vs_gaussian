@@ -4,7 +4,7 @@
 
 MVP Django application for comparing training time and quality metrics between `vanilla-nerf` and `vanilla-gaussian-splatting`. Built on top of [Nerfstudio](https://docs.nerf.studio/).
 
-**Stack:** Python 3.10+, Django 4.x, Nerfstudio (`ns-train`), Three.js (point cloud viewer), SQLite (dev) / PostgreSQL (prod).
+**Stack:** Python 3.10 (recommended on Windows), Django 5.x, Nerfstudio (`ns-train`), Three.js (point cloud viewer), SQLite (dev) / PostgreSQL (prod).
 
 **Entry point:** `manage.py` — standard Django project layout.
 
@@ -60,6 +60,69 @@ For production, replace with Celery or RQ (see `docs/architecture.md`).
 - Serves `.ply` file URLs for Three.js frontend
 - Returns run metadata (metrics, status, artifacts) as JSON
 - Endpoint: `GET /api/runs/{run_id}/artifacts/`
+
+---
+
+## Orchestration layer (NEW)
+
+### 🤖 `orchestrator`
+**Central coordinator** for user-facing tasks and agent delegation.
+
+- Analyzes user requirements, decomposes into subtasks
+- Routes tasks to specialized agents based on domain (pipeline, feature, metrics, artifacts, tests)
+- Tracks dependencies and execution order
+- Merges results and runs final QA validation
+- Outputs concise status: completed tasks, risks, next steps
+
+**When to use:** Start here for any user request; orchestrator will route to specialists.
+
+**Collaborators:** All other agents (Plan, pipeline-implementer, feature-developer, qa-test-writer, experiment-runner, metric-extractor, artifact-detector)
+
+---
+
+## Implementation agents (NEW)
+
+### 🤖 `pipeline-implementer`
+**Owns** the actual Nerfstudio pipeline orchestration layer.
+
+- Implements and maintains `experiments/services/runner.py`
+- Manages `ExperimentRun` lifecycle and status transitions
+- Builds safe CLI commands from config JSON
+- Orchestrates subprocess execution, output streaming, and metric parsing
+- Interfaces with `metric-extractor` and `artifact-detector` for result processing
+
+**Scope:** Service-layer pipeline logic; no subprocess in views/models.
+
+### 🤖 `feature-developer`
+**Owns** end-to-end Django features (forms, views, templates, services).
+
+- Implements Django forms (`ModelForm`), class-based views (CBV), URLs, templates
+- Ensures N+1 query avoidance with `select_related` / `prefetch_related`
+- Keeps views thin; moves business logic to services
+- Integrates features with pipeline / metrics / artifacts as needed
+
+**Scope:** UI, forms, views, templates, URL routing.
+
+### 🤖 `qa-test-writer`
+**Owns** test coverage for services, views, and commands.
+
+- Mocks subprocess execution; never calls real `ns-train` in tests
+- Ensures every new service function has ≥1 unit test
+- Tests view→service flows, error handling, status transitions
+- Uses pytest-django fixtures for DB isolation
+
+**Scope:** Unit tests, integration tests, mocking strategy.
+
+---
+
+## Skills (NEW)
+
+See `.github/skills/` for reusable workflows:
+
+- `agent-orchestration-routing.md` — how to route tasks between agents
+- `pipeline-command-mapping.md` — safe CLI argument building for `ns-train`
+- `django-feature-delivery-mvp.md` — MVP feature delivery checklist
+- `test-mocking-nerfstudio.md` — mocking patterns for Nerfstudio tests
 
 ---
 

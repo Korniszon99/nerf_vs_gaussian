@@ -1,2 +1,7 @@
-Django>=6.0,<7.0
+Django>=5.2,<6.0
+pytest>=8.0
+pytest-django>=4.8
+python-dotenv>=1.0
 
+# Nerfstudio / PyAV on Windows is much more reliable on Python 3.10.
+# If you need to install Nerfstudio locally, prefer Python 3.10 and install the package separately.

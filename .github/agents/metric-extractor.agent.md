@@ -2,8 +2,23 @@
 
 ## Purpose
 
-Parses Nerfstudio training log output line-by-line and writes `Metric` records to the database.  
+Parses Nerfstudio training log output line-by-line and writes `Metric` records to the database.
 Lives in `experiments/services/metrics.py`.
+
+---
+
+## Ownership boundary
+
+### May edit code
+- `experiments/services/metrics.py` — parsing rules, normalization, and `Metric` persistence
+- Metric-specific tests in `experiments/tests/test_services.py`
+
+### Must not edit
+- Runner orchestration or subprocess execution (→ `pipeline-implementer` / `experiment-runner`)
+- Artifact detection logic (→ `artifact-detector`)
+- Django UI, forms, views, or templates (→ `feature-developer`)
+- Test strategy for other modules (→ `qa-test-writer`)
+- Planning / decomposition (→ `Plan`)
 
 ---
 
@@ -70,7 +85,7 @@ def parse_and_save(line: str, run: ExperimentRun) -> None:
         values = {k: float(v) for k, v in _KV_RE.findall(line) if k in TRACKED}
 
     for name, value in values.items():
-        Metric.objects.create(run=run, name=name, value=value, step=step)
+        run.metrics.create(name=name, value=value, step=step)
 ```
 
 ---
@@ -80,6 +95,7 @@ def parse_and_save(line: str, run: ExperimentRun) -> None:
 - Write metrics with duplicate `(run, name, step)` — use `update_or_create` if re-parsing is possible
 - Block the calling thread with slow DB writes — batch inserts are fine for bulk re-import
 - Silently swallow `json.JSONDecodeError` without at least a debug log
+- Expand into artifact scanning, runner status, or view-layer concerns
 
 ---
 
@@ -90,3 +106,13 @@ Cover:
 2. `[step N] key=val` text line → correct `Metric` objects
 3. Garbage line → no writes, no exception
 4. Missing `step` field → `Metric.step = None` (allowed)
+
+---
+
+## Runtime command constraint (OS-aware)
+
+- If environment indicates Windows (e.g., Windows-style paths like `C:\...`, drive letters, `\\` separators, or explicit Windows shell), use only PowerShell/CMD-compatible commands by default.
+- If environment indicates Linux/Unix paths or shell, use Linux shell commands by default (`bash`/`sh`).
+- Do not loop between Linux and Windows command variants in one flow; pick the OS-consistent command set and continue.
+- Do not generate ad-hoc scripts prematurely when a direct shell command is enough.
+- Prioritize concise, OS-native commands to reduce token usage and avoid command retry churn.

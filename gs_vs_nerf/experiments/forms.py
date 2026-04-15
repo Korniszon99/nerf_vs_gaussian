@@ -27,16 +27,56 @@ class DatasetForm(forms.ModelForm):
             self.fields["folder_path"].initial = self.instance.data_path
 
     def clean_folder_path(self):
+        import unicodedata
         from pathlib import Path
+
         folder_str = self.cleaned_data.get("folder_path", "").strip()
         if not folder_str:
             raise forms.ValidationError("Ścieżka nie może być pusta.")
+
         path = Path(folder_str)
         if not path.exists():
             raise forms.ValidationError(f"Ścieżka nie istnieje: {path}")
         if not path.is_dir():
             raise forms.ValidationError(f"Ścieżka nie jest katalogiem: {path}")
+
+        # Sprawdź czy folder zawiera obsługiwane zdjęcia
+        supported_extensions = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif"}
+
+        # Szukaj w images/ najpierw, potem w root
+        images_dir = path / "images"
+        if images_dir.exists() and images_dir.is_dir():
+            search_dir = images_dir
+        else:
+            search_dir = path
+
+        # Wyszukaj zdjęcia
+        image_files = [
+            f for f in search_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in supported_extensions
+        ]
+
+        if not image_files:
+            search_location = f"{path}/images/ lub {path}"
+            raise forms.ValidationError(
+                f"Brak obsługiwanych zdjęć w {search_location}. "
+                f"Obsługiwane formaty: {', '.join(sorted(supported_extensions))}"
+            )
+
+        # Ostrzeżenie o znakach diakrytycznych (ale form przechodzi)
+        if self._has_diacritics(folder_str):
+            self.add_error(None, forms.ValidationError(
+                "⚠️ Ścieżka zawiera znaki diakrytyczne — upewnij się, że shell je obsługuje",
+                code="diacritics_warning",
+            ))
+
         return str(path)
+
+    @staticmethod
+    def _has_diacritics(text: str) -> bool:
+        """Sprawdź czy tekst zawiera znaki diakrytyczne (np. ąćęłńóśźż)."""
+        diacritics = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"
+        return any(char in text for char in diacritics)
 
     def save(self, commit=True):
         instance = super().save(commit=False)

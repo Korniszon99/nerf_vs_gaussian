@@ -2,10 +2,13 @@
 
 {% block content %}
 <h1>Nowy run</h1>
+<div class="alert alert-info" role="alert">
+    <strong>⚠️ Uwaga:</strong> Wybierz dataset, który ma co najmniej 1 zdjęcie. Obsługiwane formaty: jpg, jpeg, png, tif, tiff, bmp, gif.
+</div>
 <form method="post">
     {% csrf_token %}
     {{ form.as_p }}
-    <button type="submit">Utwórz run</button>
+    <button type="submit" class="btn btn-primary">Utwórz run</button>
 </form>
 {% endblock %}
 

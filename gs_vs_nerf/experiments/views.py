@@ -7,6 +7,7 @@ from django.contrib import messages
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.views.generic import TemplateView
 
@@ -119,7 +120,7 @@ def run_detail(request, pk: int):
         request,
         "experiments/run_detail.html",
         {
-            "run": run,
+            "run": ExperimentRun.objects.select_related("dataset").get(pk=run.pk),
             "metrics": metrics,
             "artifacts": artifacts,
             "cloud_url": cloud_url,
@@ -129,12 +130,31 @@ def run_detail(request, pk: int):
 
 @require_POST
 def run_start(request, pk: int):
-    run = get_object_or_404(ExperimentRun, pk=pk)
+    run = get_object_or_404(ExperimentRun.objects.select_related("dataset"), pk=pk)
     if run.status == ExperimentRun.Status.RUNNING:
         messages.info(request, "Run już jest uruchomiony.")
+    elif not run.dataset_id:
+        messages.error(request, "Run nie ma przypisanego datasetu.")
+    elif not run.dataset.images.exists():
+        messages.error(request, "Dataset nie zawiera żadnych zdjęć — nie można uruchomić runa. Zaimportuj najpierw zdjęcia.")
     else:
-        launch_run_async(run.pk)
-        messages.success(request, "Run został uruchomiony asynchronicznie.")
+        try:
+            # Najpierw pokaż stan oczekiwania w UI, potem przejdź do uruchomienia async.
+            run.status = ExperimentRun.Status.PENDING
+            if run.started_at is None:
+                run.started_at = timezone.now()
+            run.error_message = ""
+            run.finished_at = None
+            run.save(update_fields=["status", "started_at", "error_message", "finished_at"])
+
+            launch_run_async(run.pk)
+            messages.success(request, "Run został uruchomiony asynchronicznie.")
+        except Exception:
+            run.status = ExperimentRun.Status.FAILED
+            run.finished_at = timezone.now()
+            run.error_message = "Failed to start run asynchronously"
+            run.save(update_fields=["status", "finished_at", "error_message"])
+            messages.error(request, "Nie udało się uruchomić runa.")
     return redirect("experiments:run_detail", pk=run.pk)
 
 
@@ -156,14 +176,21 @@ def run_artifacts_json(request, pk: int):
 
 def run_logs_json(request, pk: int):
     """Zwraca live stdout/stderr runa w JSON (do auto-refresh)."""
-    run = get_object_or_404(ExperimentRun, pk=pk)
-    return JsonResponse({
-        "status": run.status,
-        "stdout": run.stdout_log,
-        "stderr": run.stderr_log,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-        "duration_seconds": run.duration_seconds,
-    })
+    run = get_object_or_404(ExperimentRun.objects.select_related("dataset"), pk=pk)
+    return JsonResponse(
+        {
+            "status": run.status,
+            "stdout": run.stdout_log,
+            "stderr": run.stderr_log,
+            "error_message": run.error_message,
+            "command": run.command,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "duration_seconds": run.duration_seconds,
+            "dataset_path": run.dataset.data_path if run.dataset_id else "",
+            "output_dir": run.output_dir,
+        }
+    )
 
 
 @require_POST

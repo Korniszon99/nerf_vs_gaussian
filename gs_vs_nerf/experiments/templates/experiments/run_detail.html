@@ -17,13 +17,13 @@
 
 <div class="alert alert-info">
     <strong>Status:</strong>
-    <span class="badge bg-{% if run.status == 'running' %}warning{% elif run.status == 'success' %}success{% elif run.status == 'failed' %}danger{% else %}secondary{% endif %}">
+    <span id="run-status-badge" data-run-status="{{ run.status }}" class="badge bg-{% if run.status == 'running' or run.status == 'pending' %}warning{% elif run.status == 'success' %}success{% elif run.status == 'failed' %}danger{% else %}secondary{% endif %}">
         {{ run.get_status_display }}
     </span>
-    {% if run.status == 'running' %}
+    <span id="run-status-spinner" class="{% if run.status != 'running' and run.status != 'pending' %}d-none{% endif %}">
         <span class="spinner-border spinner-border-sm ms-2" role="status" aria-hidden="true"></span>
         <small class="ms-2">Strona odświeża się co 3 sekundy...</small>
-    {% endif %}
+    </span>
 </div>
 
 <div class="row mb-3">
@@ -31,7 +31,7 @@
         <div class="card bg-light">
             <div class="card-body">
                 <small class="text-muted">Czas [s]</small>
-                <div class="h4 mb-0">{{ run.duration_seconds|default:'-' }}</div>
+                <div id="run-duration" class="h4 mb-0">{{ run.duration_seconds|default:'-' }}</div>
             </div>
         </div>
     </div>
@@ -143,44 +143,57 @@
 </div>
 
 <script type="module">
-    // Auto-refresh logów co 3 sekundy jeśli run jest running
+    const logsUrl = "{% url 'experiments:run_logs_json' run.pk %}";
+    const statusBadge = document.getElementById('run-status-badge');
+    const statusSpinner = document.getElementById('run-status-spinner');
+    const stdoutEl = document.getElementById('stdout-log');
+    const stderrEl = document.getElementById('stderr-log');
+    const durationEl = document.getElementById('run-duration');
+
+    function badgeClassForStatus(status) {
+        if (status === 'running' || status === 'pending') return 'badge bg-warning';
+        if (status === 'success') return 'badge bg-success';
+        if (status === 'failed') return 'badge bg-danger';
+        return 'badge bg-secondary';
+    }
+
+    function renderStatus(status) {
+        statusBadge.dataset.runStatus = status;
+        statusBadge.className = badgeClassForStatus(status);
+        statusBadge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        statusSpinner.classList.toggle('d-none', status !== 'running' && status !== 'pending');
+    }
+
     function refreshLogs() {
-        const runId = {{ run.pk }};
-        const isRunning = document.querySelector('[data-run-status]')?.dataset.runStatus === 'running'
-            || '{{ run.status }}'.toLowerCase() === 'running';
-
-        if (!isRunning) return; // Stop refreshing jeśli nie running
-
-        fetch(`{% url 'experiments:run_logs_json' run.pk %}`)
+        fetch(logsUrl)
             .then(r => r.json())
             .then(data => {
-                // Update logi
-                const stdoutEl = document.getElementById('stdout-log');
-                const stderrEl = document.getElementById('stderr-log');
-                if (data.stdout) stdoutEl.textContent = data.stdout;
-                if (data.stderr) stderrEl.textContent = data.stderr;
+                if (data.stdout !== undefined) stdoutEl.textContent = data.stdout || '(czekam na dane)';
+                if (data.stderr !== undefined) stderrEl.textContent = data.stderr || '(brak błędów)';
+                if (data.duration_seconds !== null && data.duration_seconds !== undefined) {
+                    durationEl.textContent = data.duration_seconds;
+                }
+                if (data.status) {
+                    renderStatus(data.status);
+                }
 
-                // Scroll do dołu
                 stdoutEl.scrollTop = stdoutEl.scrollHeight;
                 stderrEl.scrollTop = stderrEl.scrollHeight;
 
-                // Refresh za 3 sekundy
-                if (data.status === 'running') {
+                if (data.status !== 'success' && data.status !== 'failed') {
                     setTimeout(refreshLogs, 3000);
-                } else {
-                    // Refresh page jeśli skończony
-                    location.reload();
                 }
             })
-            .catch(err => console.error('Błąd refreshu:', err));
+            .catch(err => {
+                console.error('Błąd refreshu:', err);
+                setTimeout(refreshLogs, 3000);
+            });
     }
 
-    // Start auto-refresh
-    if ('{{ run.status }}' === 'running') {
+    if (statusBadge.dataset.runStatus === 'pending' || statusBadge.dataset.runStatus === 'running') {
         refreshLogs();
     }
 </script>
 
 <script type="module" src="{% static 'experiments/js/viewer.js' %}"></script>
 {% endblock %}
-

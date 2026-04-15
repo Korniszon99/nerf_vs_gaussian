@@ -16,20 +16,84 @@ Aplikacja przechowuje datasety, zdjecia, orientacje kamer, runy eksperymentow, m
 
 ## Wymagania
 
-- Python 3.11+ (zalecane)
-- Nerfstudio z dostepnym poleceniem `ns-train`
+- Python 3.10.x (zalecane na Windows dla kompatybilności z `av`/Nerfstudio)
+- Conda / Anaconda albo Miniconda
+- `pip`, `setuptools`, `wheel`, `cython` w aktualnych wersjach
+- Nerfstudio z dostępnym poleceniem `ns-train`
 - Windows PowerShell lub Linux/macOS shell
 
-## Szybki start (Windows PowerShell)
+## Przygotowanie srodowiska (Windows + Conda)
+
+Najpewniejsza konfiguracja dla tego projektu na Windows to **Conda z Pythonem 3.10**.
+
+1. Otworz **Anaconda Prompt** albo **Anaconda PowerShell Prompt**.
+2. Przejdz do katalogu projektu `gs_vs_nerf`.
+3. Utworz i aktywuj nowe srodowisko.
+4. Zainstaluj zaleznosci Django i dopiero potem Nerfstudio.
+
+```powershell
+cd C:\Users\User\PycharmProjects\nerf_vs_gaussian\gs_vs_nerf
+conda create -n gs-nerf python=3.10 -y
+conda activate gs-nerf
+python -m pip install -U pip setuptools wheel cython
+pip install -r requirements.txt
+```
+
+Jesli chcesz instalowac Nerfstudio lokalnie w tym samym srodowisku, zrob to po aktywacji env:
+
+```powershell
+pip install --only-binary=:all: av
+pip install nerfstudio
+```
+
+Jesli `av` nadal probuje budowac sie ze zrodel i pada, upewnij sie, ze:
+- aktywne jest srodowisko `conda` z Pythonem 3.10
+- `pip`, `setuptools`, `wheel` i `cython` sa zaktualizowane
+- instalujesz Nerfstudio w tym samym env, w ktorym uruchamiasz Django
+
+### Integracja z PyCharm
+
+W PyCharm nie trzeba recznie dodawac Anacondy do PATH. Lepiej ustawic interpreter projektu na srodowisko Conda:
+
+1. `File -> Settings -> Project -> Python Interpreter`
+2. `Add Interpreter`
+3. `Conda Environment`
+4. wybierz `Existing environment` lub `New environment`
+5. wskaż interpreter z katalogu env, np. `C:\Users\User\anaconda3\envs\gs-nerf\python.exe`
+
+Po tym terminal w PyCharm moze uzywac tego samego env, jesli aktywujesz je komenda:
+
+```powershell
+conda activate gs-nerf
+```
+
+## Jak zainstalowac Nerfstudio i uzyskac `ns-train`
+
+Nerfstudio najlepiej instalowac **po zalozeniu i aktywacji** srodowiska Conda.
+
+```powershell
+conda activate gs-nerf
+pip install nerfstudio
+ns-train --help
+```
+
+Jesli komenda `ns-train` nie jest znaleziona:
+- sprawdz, czy aktywowane jest wlasciwe env
+- sprawdz `where ns-train`
+- jesli trzeba, ustaw w projekcie zmienna `NERFSTUDIO_BIN` na pelna sciezke do `ns-train.exe`
+
+Przyklad dla PowerShell:
+
+```powershell
+$env:NERFSTUDIO_BIN = "C:\sciezka\do\ns-train.exe"
+```
+
+## Szybki start (Windows PowerShell + Conda)
 
 Uruchamiaj komendy z katalogu `gs_vs_nerf` (tam sa `manage.py` i `requirements.txt`).
 
 ```powershell
-cd C:\Users\User\PycharmProjects\nerf_vs_gaussian\gs_vs_nerf
-python -m venv .venv
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+conda activate gs-nerf
 python manage.py migrate
 python manage.py createsuperuser
 python manage.py runserver
@@ -64,6 +128,8 @@ Na Linux/macOS:
 ```bash
 export NERFSTUDIO_BIN=/sciezka/do/ns-train
 ```
+
+Jeśli nie ustawisz `NERFSTUDIO_BIN`, backend zwykle probuje uzyc domyslnego `ns-train` z `PATH`.
 
 ## Oczekiwany layout datasetu pod pipeline
 
@@ -147,7 +213,8 @@ python manage.py test
 
 ## Troubleshooting
 
-- `source` not recognized: w PowerShell aktywuj srodowisko przez `\.\.venv\Scripts\Activate.ps1`, nie przez `source`.
+- `conda` not recognized: uruchom **Anaconda Prompt** albo **Anaconda PowerShell Prompt**; w zwyklym PowerShell wpisz `conda activate gs-nerf` dopiero po poprawnej inicjalizacji Condy.
+- `source` not recognized: w PowerShell aktywuj srodowisko przez `conda activate gs-nerf`, nie przez `source`.
 - `requirements.txt not found`: wejdz do katalogu `gs_vs_nerf` przed `pip install -r requirements.txt`.
 - `ns-train not found`: ustaw `NERFSTUDIO_BIN` albo dodaj Nerfstudio do `PATH`.
 - Run failuje zaraz po starcie: sprawdz czy `Dataset.data_path` wskazuje poprawny katalog i czy layout datasetu jest zgodny z sekcja powyzej.

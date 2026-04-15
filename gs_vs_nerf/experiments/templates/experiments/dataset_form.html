@@ -2,10 +2,14 @@
 
 {% block content %}
 <h1>Nowy dataset</h1>
+<div class="alert alert-info" role="alert">
+    <strong>ℹ️ Informacja:</strong> Ścieżka musi zawierać obsługiwane zdjęcia (jpg, jpeg, png, tif, tiff, bmp, gif).
+    Zdjęcia mogą być w podfolderu <code>images/</code> lub w głównym folderze datasetu.
+</div>
 <form method="post">
     {% csrf_token %}
     {{ form.as_p }}
-    <button type="submit">Zapisz</button>
+    <button type="submit" class="btn btn-primary">Zapisz</button>
 </form>
 {% endblock %}
 

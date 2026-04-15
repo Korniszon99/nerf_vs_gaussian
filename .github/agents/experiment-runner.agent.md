@@ -79,3 +79,13 @@ def _get_nerfstudio_bin() -> str:
 def test_start_run_success(mock_popen, mock_bin):
     ...
 ```
+
+---
+
+## Runtime command constraint (OS-aware)
+
+- If environment indicates Windows (e.g., Windows-style paths like `C:\...`, drive letters, `\\` separators, or explicit Windows shell), use only PowerShell/CMD-compatible commands by default.
+- If environment indicates Linux/Unix paths or shell, use Linux shell commands by default (`bash`/`sh`).
+- Do not loop between Linux and Windows command variants in one flow; pick the OS-consistent command set and continue.
+- Do not generate ad-hoc scripts prematurely when a direct shell command is enough.
+- Prioritize concise, OS-native commands to reduce token usage and avoid command retry churn.
