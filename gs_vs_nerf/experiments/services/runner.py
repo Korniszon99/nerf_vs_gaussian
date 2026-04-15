@@ -175,9 +175,8 @@ class NerfstudioRunner:
         if not self._has_blender_layout(dataset_path) and not self._has_colmap_layout(dataset_path):
             expected = ", ".join(self._BLENDER_SPLIT_FILES)
             raise ValueError(
-                "Dataset layout is not compatible with Nerfstudio. "
-                f"Expected Blender files ({expected}) in {dataset_path} "
-                f"or COLMAP reconstruction in {dataset_path / 'sparse' / '0'} (see README)."
+                "Dataset must contain either Blender split files "
+                f"({expected}) or a COLMAP reconstruction directory at dataset_root/sparse/0/ (see README)."
             )
 
         logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
@@ -247,7 +246,17 @@ class NerfstudioRunner:
         return cmd
 
     def _resolve_dataparser_type(self, run: ExperimentRun, dataset_path: Path) -> str | None:
-        """Resolve dataparser type from config or dataset layout auto-detection."""
+        """Resolve dataparser type from run config or dataset layout.
+
+        Args:
+            run: Experiment run that may contain explicit parser settings in config_json.
+            dataset_path: Absolute or relative path to dataset root on disk.
+
+        Returns:
+            str or None: Explicit parser type from config (supports `dataparser_type` and
+            legacy `dataparser`), `nerfstudio-data` for detected COLMAP layout, or ``None``
+            to keep Nerfstudio default (Blender parser).
+        """
         cfg = run.config_json or {}
         explicit = cfg.get("dataparser_type") or cfg.get("dataparser")
         if explicit:

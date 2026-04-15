@@ -53,19 +53,22 @@ class RunnerBuildCommandTests(TestCase):
 
     def test_build_command_with_max_iterations(self) -> None:
         self.run.config_json = {"max_num_iterations": 1000}
-        with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
-            cmd = NerfstudioRunner()._build_command(self.run)
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(self.run)
         self.assertIn("--max-num-iterations", cmd)
         self.assertIn("1000", cmd)
 
     def test_build_command_with_downscale_factor(self) -> None:
         self.run.config_json = {"downscale_factor": 2}
-        with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
-            cmd = NerfstudioRunner()._build_command(self.run)
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(self.run)
         self.assertIn("--pipeline.datamanager.camera-res-scale-factor", cmd)
         self.assertIn("2", cmd)
 
-    def test_build_command_auto_sets_nerfstudio_dataparser_for_colmap_layout(self) -> None:
+    def test_auto_selects_nerfstudio_dataparser_for_colmap(self) -> None:
+        runner = NerfstudioRunner()
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             (tmp_path / "images").mkdir()
@@ -73,16 +76,17 @@ class RunnerBuildCommandTests(TestCase):
             self.dataset.data_path = str(tmp_path)
             self.dataset.save(update_fields=["data_path"])
 
-            with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
-                cmd = NerfstudioRunner()._build_command(self.run)
+            with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+                cmd = runner._build_command(self.run)
 
         self.assertIn("--pipeline.datamanager.dataparser-type", cmd)
         self.assertIn("nerfstudio-data", cmd)
 
     def test_build_command_uses_explicit_dataparser_from_config(self) -> None:
         self.run.config_json = {"dataparser_type": "blender-data"}
-        with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
-            cmd = NerfstudioRunner()._build_command(self.run)
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(self.run)
 
         parser_flag_index = cmd.index("--pipeline.datamanager.dataparser-type")
         self.assertEqual(cmd[parser_flag_index + 1], "blender-data")
@@ -274,7 +278,7 @@ class DatasetValidationTests(TestCase):
             with self.assertRaises(ValueError) as ctx:
                 self.runner._validate_dataset_path(run)
 
-            self.assertIn("not compatible", str(ctx.exception))
+            self.assertIn("must contain either Blender split files", str(ctx.exception))
 
 
 class RunnerExecutionTests(TestCase):
