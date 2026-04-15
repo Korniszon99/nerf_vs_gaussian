@@ -163,7 +163,8 @@
     function alertClassForStatus(status) {
         if (status === 'success') return 'alert alert-success';
         if (status === 'failed') return 'alert alert-danger';
-        return 'alert alert-warning';
+        if (status === 'running' || status === 'pending') return 'alert alert-warning';
+        return 'alert alert-secondary';
     }
 
     function badgeClassForStatus(status) {
@@ -196,7 +197,10 @@
                 }
                 if (errorMsgEl && data.error_message !== undefined) {
                     errorMsgEl.textContent = data.error_message || '';
-                    errorMsgEl.closest('div').classList.toggle('d-none', !data.error_message || data.status !== 'failed');
+                    const errorDiv = errorMsgEl.closest('div');
+                    if (errorDiv) {
+                        errorDiv.classList.toggle('d-none', !data.error_message || data.status !== 'failed');
+                    }
                 }
 
                 stdoutEl.scrollTop = stdoutEl.scrollHeight;
