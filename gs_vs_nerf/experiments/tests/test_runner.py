@@ -91,6 +91,22 @@ class RunnerBuildCommandTests(TestCase):
         parser_flag_index = cmd.index("--pipeline.datamanager.dataparser-type")
         self.assertEqual(cmd[parser_flag_index + 1], "blender-data")
 
+    def test_build_command_maps_vanilla_gs_to_splatfacto(self) -> None:
+        """vanilla-gaussian-splatting must be translated to splatfacto for ns-train."""
+        gs_run = ExperimentRun.objects.create(
+            name="test-gs",
+            dataset=self.dataset,
+            pipeline_type=ExperimentRun.PipelineType.VANILLA_GS,
+            output_dir="/tmp/out/run_gs",
+            config_json={},
+        )
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(gs_run)
+
+        self.assertEqual(cmd[1], "splatfacto")
+        self.assertNotIn("vanilla-gaussian-splatting", cmd)
+
     def test_normalize_dataset_path_keeps_windows_absolute_path(self) -> None:
         runner = NerfstudioRunner()
         normalized = runner._normalize_dataset_path(r"C:\datasets\scene one")

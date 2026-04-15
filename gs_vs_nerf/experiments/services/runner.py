@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 class NerfstudioRunner:
     _BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
 
+    # Map Django model pipeline_type values to actual ns-train subcommand names.
+    # vanilla-gaussian-splatting is not a valid ns-train subcommand; splatfacto is.
+    _NS_TRAIN_METHOD_MAP: dict[str, str] = {
+        "vanilla-gaussian-splatting": "splatfacto",
+    }
+
     def __init__(self) -> None:
         self.bin_name = getattr(settings, "NERFSTUDIO_BIN", "ns-train")
 
@@ -213,7 +219,8 @@ class NerfstudioRunner:
         return f"ns-train failed with exit code {returncode}"
 
     def _build_command(self, run: ExperimentRun) -> list[str]:
-        pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
+        raw_pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
+        pipeline = self._NS_TRAIN_METHOD_MAP.get(raw_pipeline, raw_pipeline)
         cfg = run.config_json or {}
         binary = self._resolve_binary()
         dataset_path = self._normalize_dataset_path(str(run.dataset.data_path))
