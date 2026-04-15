@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from shutil import which
 from typing import Any
 
 NERFSTUDIO_TRANSFORMS_FILE = "transforms.json"
 BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
+SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".exr"}
+TIFF_IMAGE_EXTENSIONS = {".tif", ".tiff"}
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +45,7 @@ def main() -> int:
         0 on success, otherwise 1 with an error message printed to stderr.
     """
     args = parse_args()
+    logging.basicConfig(level=logging.INFO, format="[preprocess] %(levelname)s: %(message)s")
     input_dir = Path(args.input_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
 
@@ -45,6 +55,7 @@ def main() -> int:
         print(f"[preprocess] ERROR: {exc}", file=sys.stderr)
         return 1
 
+    # Keep machine-readable stdout output for the runner contract.
     print(json.dumps({"status": "success", "output_dir": str(output_dir)}))
     return 0
 
@@ -93,31 +104,313 @@ def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) ->
         output_dir: Directory where processed output is generated.
         skip_colmap: Whether to pass --skip-colmap to the command.
     """
+    _ensure_ffmpeg_available()
+
+    process_input_dir = _resolve_ns_process_data_input_dir(input_dir)
     command = [
         "ns-process-data",
         "images",
         "--data",
-        str(input_dir),
+        str(process_input_dir),
         "--output-dir",
         str(output_dir),
     ]
     if skip_colmap:
         command.append("--skip-colmap")
+    if _should_disable_fast_image_processing(input_dir=input_dir):
+        command.append("--no-same-dimensions")
 
-    print(f"[preprocess] Running: {subprocess.list2cmdline(command)}")
+    logger.info("Running: %s", subprocess.list2cmdline(command))
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
 
+    retried_input_dir: Path | None = None
+    last_attempt_input_dir = process_input_dir
+    if completed.returncode != 0 and _can_retry_with_windows_staging(process_input_dir):
+        retried_input_dir = _prepare_windows_input_staging(
+            input_dir=input_dir,
+            process_input_dir=process_input_dir,
+            skip_colmap=skip_colmap,
+        )
+        if retried_input_dir != process_input_dir:
+            retry_command = _replace_data_arg(command, retried_input_dir)
+            logger.warning(
+                "ns-process-data failed on initial input. Retrying with sanitized staging directory: %s",
+                retried_input_dir,
+            )
+            logger.info("Retry command: %s", subprocess.list2cmdline(retry_command))
+            completed = subprocess.run(retry_command, text=True, capture_output=True, check=False)
+            last_attempt_input_dir = retried_input_dir
+
+            if completed.returncode != 0 and _can_retry_with_staging_root(retried_input_dir):
+                staging_root = retried_input_dir.parent
+                root_retry_command = _replace_data_arg(command, staging_root)
+                logger.warning(
+                    "Retry on staged images directory failed. Retrying once with staging root: %s",
+                    staging_root,
+                )
+                logger.info("Root retry command: %s", subprocess.list2cmdline(root_retry_command))
+                completed = subprocess.run(root_retry_command, text=True, capture_output=True, check=False)
+                last_attempt_input_dir = staging_root
+
     if completed.stdout.strip():
-        print("[preprocess] ns-process-data output:")
-        print(completed.stdout.strip())
+        logger.info("ns-process-data output:\n%s", completed.stdout.strip())
     if completed.returncode != 0:
-        stderr_text = completed.stderr.strip() or "no stderr captured"
+        stderr_text = completed.stderr.strip()
+        stdout_text = completed.stdout.strip()
+        details = stderr_text or stdout_text or "no stdout/stderr captured"
+        if stderr_text and stdout_text and stdout_text != stderr_text:
+            details = f"stderr: {stderr_text}; stdout: {stdout_text}"
+        if retried_input_dir is not None:
+            details = f"{details}. Retry input directory: {last_attempt_input_dir}"
         raise RuntimeError(
             "ns-process-data images failed with "
-            f"exit code {completed.returncode}. Details: {stderr_text}"
+            f"exit code {completed.returncode}. Details: {details}"
         )
 
-    print("[preprocess] transforms.json generation completed.")
+    logger.info("transforms.json generation completed.")
+
+
+def _ensure_ffmpeg_available() -> None:
+    """Fail fast with a Windows-friendly diagnostic when ffmpeg is missing from PATH."""
+    if which("ffmpeg") or which("ffmpeg.exe"):
+        return
+
+    path_value = os.environ.get("PATH", "")
+    path_entries = path_value.split(os.pathsep) if path_value else []
+    path_preview = os.pathsep.join(path_entries[:5]) if path_entries else "<empty>"
+    raise EnvironmentError(
+        "Could not find ffmpeg on PATH. Install ffmpeg and make sure the directory containing "
+        f"ffmpeg.exe is available to the Python process. Current PATH preview: {path_preview}"
+    )
+
+
+def _resolve_ns_process_data_input_dir(input_dir: Path) -> Path:
+    """Pick the most specific image directory for ns-process-data.
+
+    If the dataset follows the common ``dataset/images/`` layout and that folder
+    contains images, pass that directory to ``ns-process-data``. Otherwise fall
+    back to the dataset root so root-level image datasets still work.
+
+    When a COLMAP layout is present at ``sparse/0``, keep the dataset root so
+    ``ns-process-data`` can still see the reconstruction metadata instead of
+    hiding it behind the ``images/`` subdirectory.
+    """
+    if (input_dir / "sparse" / "0").is_dir():
+        return input_dir
+
+    images_dir = input_dir / "images"
+    if images_dir.is_dir() and any(
+        child.is_file() and child.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS for child in images_dir.iterdir()
+    ):
+        return images_dir
+    return input_dir
+
+
+def _should_disable_fast_image_processing(input_dir: Path) -> bool:
+    """Return True when TIFF datasets on Windows should avoid the fast ffmpeg path."""
+    if not sys.platform.startswith("win"):
+        return False
+    return _contains_tiff_images(input_dir)
+
+
+def _contains_tiff_images(input_dir: Path) -> bool:
+    """Return True if TIFF images exist in the dataset root or images/ subdirectory."""
+    candidate_dirs = []
+    images_dir = input_dir / "images"
+    if images_dir.is_dir():
+        candidate_dirs.append(images_dir)
+    if input_dir.is_dir():
+        candidate_dirs.append(input_dir)
+
+    seen: set[Path] = set()
+    for candidate_dir in candidate_dirs:
+        if candidate_dir in seen:
+            continue
+        seen.add(candidate_dir)
+        for child in candidate_dir.iterdir():
+            if child.is_file() and child.suffix.lower() in TIFF_IMAGE_EXTENSIONS:
+                return True
+    return False
+
+
+def _prepare_windows_input_staging(
+    input_dir: Path,
+    process_input_dir: Path,
+    skip_colmap: bool,
+) -> Path:
+    """Create a sanitized staging dataset on Windows when TIFF or unsafe file names are detected.
+
+    The staging root is created in the OS temp directory to avoid nested input/output
+    interactions during retry runs and to keep Windows paths shorter.
+    """
+    if not sys.platform.startswith("win"):
+        return process_input_dir
+
+    image_dir = _resolve_image_directory(process_input_dir)
+    image_files = _list_supported_images(image_dir)
+    if not image_files:
+        return process_input_dir
+
+    requires_staging = _contains_tiff_images(image_dir) or _has_unsafe_image_names(image_files)
+    if not requires_staging:
+        return process_input_dir
+
+    staging_root = _create_windows_staging_root()
+
+    destination_images_dir = staging_root / "images"
+    destination_images_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, source_file in enumerate(image_files):
+        _stage_windows_image(source_file=source_file, destination_images_dir=destination_images_dir, index=index)
+
+    if skip_colmap and (input_dir / "sparse" / "0").is_dir():
+        source_sparse = input_dir / "sparse"
+        destination_sparse = staging_root / "sparse"
+        shutil.copytree(source_sparse, destination_sparse, dirs_exist_ok=True)
+
+    logger.info(
+        "Using Windows staging input with sanitized image names: %s (copied %d files)",
+        staging_root,
+        len(image_files),
+    )
+
+    if skip_colmap and (staging_root / "sparse" / "0").is_dir():
+        return staging_root
+    return destination_images_dir
+
+
+def _create_windows_staging_root() -> Path:
+    """Create and return a writable staging root for Windows retry preprocessing."""
+    try:
+        return Path(tempfile.mkdtemp(prefix="ns_preprocess_staging_"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not create temporary staging directory via tempfile.mkdtemp: %s. "
+            "Falling back to current working directory.",
+            exc,
+        )
+        fallback_root = Path.cwd() / "_preprocess_staging"
+        if fallback_root.exists():
+            shutil.rmtree(fallback_root)
+        fallback_root.mkdir(parents=True, exist_ok=True)
+        return fallback_root
+
+
+def _resolve_image_directory(process_input_dir: Path) -> Path:
+    """Return the directory that directly contains image files for preprocessing."""
+    nested_images_dir = process_input_dir / "images"
+    if nested_images_dir.is_dir():
+        return nested_images_dir
+    return process_input_dir
+
+
+def _stage_windows_image(source_file: Path, destination_images_dir: Path, index: int) -> Path:
+    """Copy one image into staging using a deterministic safe filename.
+
+    TIFF images are converted to PNG when Pillow is available to avoid ffmpeg
+    decode issues on some Windows builds.
+    """
+    source_suffix = source_file.suffix.lower()
+    if source_suffix in TIFF_IMAGE_EXTENSIONS:
+        png_destination = destination_images_dir / f"frame_{index:06d}.png"
+        if _convert_tiff_to_png(source_file=source_file, destination_file=png_destination):
+            return png_destination
+
+        fallback_destination = destination_images_dir / f"frame_{index:06d}{source_suffix}"
+        shutil.copy2(source_file, fallback_destination)
+        logger.warning(
+            "Could not convert TIFF to PNG for staging (%s). Falling back to copied TIFF: %s",
+            source_file,
+            fallback_destination,
+        )
+        return fallback_destination
+
+    normalized_ext = source_suffix or ".png"
+    destination_file = destination_images_dir / f"frame_{index:06d}{normalized_ext}"
+    shutil.copy2(source_file, destination_file)
+    return destination_file
+
+
+def _convert_tiff_to_png(source_file: Path, destination_file: Path) -> bool:
+    """Convert a TIFF image to PNG using Pillow when available."""
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except ImportError:
+        logger.warning(
+            "Pillow is not installed, cannot convert TIFF to PNG during staging: %s",
+            source_file,
+        )
+        return False
+
+    try:
+        with Image.open(source_file) as image:
+            image.save(destination_file, format="PNG")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TIFF to PNG conversion failed for %s: %s", source_file, exc)
+        return False
+
+    return True
+
+
+def _list_supported_images(image_dir: Path) -> list[Path]:
+    """Return supported image files in deterministic order."""
+    if not image_dir.is_dir():
+        return []
+
+    files = [
+        path
+        for path in image_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+    ]
+    return sorted(files, key=lambda path: path.name.lower())
+
+
+def _has_unsafe_image_names(image_files: list[Path]) -> bool:
+    """Return True for names likely to break ffmpeg parsing on Windows pipelines."""
+    for image_file in image_files:
+        name = image_file.name
+        if name != name.strip() or any(char.isspace() for char in name):
+            return True
+    return False
+
+
+def _can_retry_with_windows_staging(process_input_dir: Path) -> bool:
+    """Return True when Windows image input can be retried via a sanitized staging directory."""
+    if not sys.platform.startswith("win"):
+        return False
+
+    image_dir = _resolve_image_directory(process_input_dir)
+    image_files = _list_supported_images(image_dir)
+    if not image_files:
+        return False
+
+    return _contains_tiff_images(image_dir) or _has_unsafe_image_names(image_files)
+
+
+def _replace_data_arg(command: list[str], data_dir: Path) -> list[str]:
+    """Return a command copy with the --data argument updated to a new directory."""
+    if "--data" not in command:
+        return command[:]
+
+    index = command.index("--data") + 1
+    updated = command[:]
+    if index < len(updated):
+        updated[index] = str(data_dir)
+    return updated
+
+
+def _can_retry_with_staging_root(retried_input_dir: Path) -> bool:
+    """Return True when a Windows retry used a staging `images` directory.
+
+    In that case, a final retry with the staging root can avoid ffmpeg issues
+    observed on some Windows setups for `.../images` input paths.
+    """
+    if not sys.platform.startswith("win"):
+        return False
+
+    parent_name = retried_input_dir.parent.name.lower()
+    is_staging_parent = parent_name.startswith("ns_preprocess_staging_") or parent_name == "_preprocess_staging"
+    return retried_input_dir.name.lower() == "images" and is_staging_parent
 
 
 def load_transforms_json(transforms_path: Path) -> dict[str, Any]:
@@ -137,7 +430,7 @@ def load_transforms_json(transforms_path: Path) -> dict[str, Any]:
     if not isinstance(frames, list):
         raise ValueError(f"Invalid transforms.json format: 'frames' must be a list in {transforms_path}")
 
-    print(f"[preprocess] Loaded {len(frames)} frames from {transforms_path.name}.")
+    logger.info("Loaded %d frames from %s.", len(frames), transforms_path.name)
     return transforms_data
 
 
@@ -195,7 +488,7 @@ def write_blender_split_files(transforms_data: dict[str, Any], output_dir: Path)
         payload = build_split_payload(base_metadata=base_metadata, split_frames_data=split_data)
         split_path = output_dir / file_name
         split_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"[preprocess] Wrote {file_name} ({len(split_data)} frames).")
+        logger.info("Wrote %s (%d frames).", file_name, len(split_data))
 
 
 if __name__ == "__main__":

@@ -419,6 +419,10 @@ class NerfstudioRunner:
         return (dataset_path / self._NERFSTUDIO_TRANSFORMS_FILE).is_file()
 
     def _resolve_binary(self) -> str:
+        candidate = Path(self.bin_name)
+        if candidate.exists():
+            return self.bin_name
+
         if any(sep in self.bin_name for sep in ("\\", "/")) or ":" in self.bin_name:
             return self.bin_name
 
