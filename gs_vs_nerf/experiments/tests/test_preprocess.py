@@ -201,6 +201,82 @@ class PreprocessSplitTests(SimpleTestCase):
     @patch("preprocess.subprocess.run")
     @patch("preprocess._convert_tiff_to_png", side_effect=_fake_tiff_to_png)
     @patch("preprocess.sys.platform", "win32")
+    def test_run_ns_process_data_retries_with_skip_image_processing_after_ffmpeg_failure(
+        self,
+        _mock_convert,
+        mock_run,
+        _mock_which,
+    ) -> None:
+        """A Windows ffmpeg error should trigger one final retry with --skip-image-processing."""
+        first_run = MagicMock(returncode=1, stdout="", stderr="initial fail")
+        second_run = MagicMock(returncode=1, stdout="", stderr="staged images fail")
+        third_run = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Error running command: ffmpeg -y -i input.png output.png",
+        )
+        fourth_run = MagicMock(returncode=0, stdout="ok\n", stderr="")
+        mock_run.side_effect = [first_run, second_run, third_run, fourth_run]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_dir = Path(tmp_dir) / "dataset"
+            images_dir = input_dir / "images"
+            output_dir = Path(tmp_dir) / "out"
+            images_dir.mkdir(parents=True)
+            (images_dir / "IMG_2105 .tif").write_text("fake image")
+
+            run_ns_process_data(input_dir=input_dir, output_dir=output_dir, skip_colmap=False)
+
+        self.assertEqual(mock_run.call_count, 4)
+
+        third_command = mock_run.call_args_list[2].args[0]
+        third_data_index = third_command.index("--data") + 1
+        third_data_dir = Path(third_command[third_data_index])
+
+        fourth_command = mock_run.call_args_list[3].args[0]
+        fourth_data_index = fourth_command.index("--data") + 1
+        self.assertEqual(Path(fourth_command[fourth_data_index]), third_data_dir)
+        self.assertIn("--skip-image-processing", fourth_command)
+
+    @patch("preprocess.which", return_value="C:/ffmpeg/bin/ffmpeg.exe")
+    @patch("preprocess.subprocess.run")
+    @patch("preprocess._convert_tiff_to_png", side_effect=_fake_tiff_to_png)
+    @patch("preprocess.sys.platform", "win32")
+    def test_run_ns_process_data_reports_error_when_skip_image_processing_retry_also_fails(
+        self,
+        _mock_convert,
+        mock_run,
+        _mock_which,
+    ) -> None:
+        """When the final --skip-image-processing retry fails, surfaced error should include that failure."""
+        first_run = MagicMock(returncode=1, stdout="", stderr="initial fail")
+        second_run = MagicMock(returncode=1, stdout="", stderr="staged images fail")
+        third_run = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Error running command: ffmpeg -y -i input.png output.png",
+        )
+        fourth_run = MagicMock(returncode=1, stdout="", stderr="skip-image-processing retry failed")
+        mock_run.side_effect = [first_run, second_run, third_run, fourth_run]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_dir = Path(tmp_dir) / "dataset"
+            images_dir = input_dir / "images"
+            output_dir = Path(tmp_dir) / "out"
+            images_dir.mkdir(parents=True)
+            (images_dir / "IMG_2105 .tif").write_text("fake image")
+
+            with self.assertRaises(RuntimeError) as ctx:
+                run_ns_process_data(input_dir=input_dir, output_dir=output_dir, skip_colmap=False)
+
+        self.assertEqual(mock_run.call_count, 4)
+        self.assertIn("skip-image-processing retry failed", str(ctx.exception))
+        self.assertIn("Retry input directory:", str(ctx.exception))
+
+    @patch("preprocess.which", return_value="C:/ffmpeg/bin/ffmpeg.exe")
+    @patch("preprocess.subprocess.run")
+    @patch("preprocess._convert_tiff_to_png", side_effect=_fake_tiff_to_png)
+    @patch("preprocess.sys.platform", "win32")
     def test_run_ns_process_data_reports_last_retry_input_when_all_retries_fail(
         self,
         _mock_convert,
@@ -341,4 +417,3 @@ class PreprocessSplitTests(SimpleTestCase):
 
         self.assertIn("Could not find ffmpeg on PATH", str(ctx.exception))
         self.assertIn("ffmpeg.exe", str(ctx.exception))
-

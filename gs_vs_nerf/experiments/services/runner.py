@@ -375,7 +375,11 @@ class NerfstudioRunner:
         )
 
         if completed.returncode != 0:
-            details = completed.stderr.strip() or completed.stdout.strip()
+            stderr_text = completed.stderr.strip()
+            stdout_text = completed.stdout.strip()
+            details = stderr_text or stdout_text
+            if stderr_text and stdout_text and stdout_text != stderr_text:
+                details = f"stderr: {stderr_text}; stdout: {stdout_text}"
             raise ValueError(f"Preprocess failed with exit code {completed.returncode}: {details}")
 
         parsed_output = self._parse_preprocess_output(completed.stdout)

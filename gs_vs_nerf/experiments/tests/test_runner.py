@@ -574,6 +574,32 @@ class RunnerExecutionTests(TestCase):
         self.assertNotIn("preprocess.py", " ".join(train_command))
 
     @patch("experiments.services.runner.subprocess.run")
+    def test_run_preprocess_script_error_keeps_stdout_and_stderr_details(self, mock_run) -> None:
+        """Preprocess failure details should preserve stderr and stdout for runtime diagnosis."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            dataset_path = tmp_path / "dataset"
+            (dataset_path / "images").mkdir(parents=True)
+            (dataset_path / "images" / "frame_001.jpg").write_text("fake image")
+
+            self.run.output_dir = str(tmp_path / "run_output")
+            self.run.save(update_fields=["output_dir"])
+
+            mock_run.return_value = self._make_mock_completed_process(
+                "[preprocess] INFO: ns-process-data output:\n...",
+                "[preprocess] ERROR: Error running command: ffmpeg ...",
+                1,
+            )
+
+            runner = NerfstudioRunner()
+            with self.assertRaises(ValueError) as ctx:
+                runner._run_preprocess_script(self.run, dataset_path)
+
+        self.assertIn("Preprocess failed with exit code 1", str(ctx.exception))
+        self.assertIn("stderr: [preprocess] ERROR: Error running command: ffmpeg", str(ctx.exception))
+        self.assertIn("stdout: [preprocess] INFO: ns-process-data output:", str(ctx.exception))
+
+    @patch("experiments.services.runner.subprocess.run")
     def test_run_calls_subprocess_with_utf8_decoding_and_utf8_env(self, mock_run) -> None:
         """Regresja: subprocess.run musi dostać UTF-8 env oraz parametry dekodowania."""
         mock_run.return_value = self._make_mock_completed_process("ok\n", "", 0)

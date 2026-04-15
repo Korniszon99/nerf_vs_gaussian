@@ -152,6 +152,20 @@ def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) ->
                 completed = subprocess.run(root_retry_command, text=True, capture_output=True, check=False)
                 last_attempt_input_dir = staging_root
 
+    if (
+        completed.returncode != 0
+        and sys.platform.startswith("win")
+        and _looks_like_ffmpeg_processing_failure(completed)
+    ):
+        skip_processing_command = _with_skip_image_processing_flag(
+            _replace_data_arg(command, last_attempt_input_dir)
+        )
+        logger.warning(
+            "Detected ffmpeg processing failure on Windows. Retrying once with --skip-image-processing."
+        )
+        logger.info("Skip-image-processing retry command: %s", subprocess.list2cmdline(skip_processing_command))
+        completed = subprocess.run(skip_processing_command, text=True, capture_output=True, check=False)
+
     if completed.stdout.strip():
         logger.info("ns-process-data output:\n%s", completed.stdout.strip())
     if completed.returncode != 0:
@@ -397,6 +411,21 @@ def _replace_data_arg(command: list[str], data_dir: Path) -> list[str]:
     if index < len(updated):
         updated[index] = str(data_dir)
     return updated
+
+
+def _with_skip_image_processing_flag(command: list[str]) -> list[str]:
+    """Return command copy with `--skip-image-processing` appended when absent."""
+    if "--skip-image-processing" in command:
+        return command[:]
+    return [*command, "--skip-image-processing"]
+
+
+def _looks_like_ffmpeg_processing_failure(completed: subprocess.CompletedProcess[str]) -> bool:
+    """Return True when ns-process-data output indicates an ffmpeg command failure."""
+    stderr_text = completed.stderr or ""
+    stdout_text = completed.stdout or ""
+    failure_output = (stderr_text + "\n" + stdout_text).lower()
+    return "error running command: ffmpeg" in failure_output
 
 
 def _can_retry_with_staging_root(retried_input_dir: Path) -> bool:
