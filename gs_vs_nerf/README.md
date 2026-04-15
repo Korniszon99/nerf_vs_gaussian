@@ -196,7 +196,7 @@ Podczas tworzenia `ExperimentRun`:
 Runner mapuje te pola na argumenty CLI:
 - `max_num_iterations` -> `--max-num-iterations`
 - `downscale_factor` -> `--pipeline.datamanager.camera-res-scale-factor`
-`dataparser_type` nie jest obecnie przekazywany do CLI, bo w nowszych wersjach Nerfstudio opcja
+`dataparser_type` nie jest przekazywany do CLI, bo w nowszych wersjach Nerfstudio opcja
 `--pipeline.datamanager.dataparser-type` jest nierozpoznawana.
 
 Dataset nadal jest walidowany pod kątem układu COLMAP (`sparse/0/`) albo Blender

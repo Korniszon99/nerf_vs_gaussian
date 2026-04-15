@@ -82,7 +82,7 @@ class RunnerBuildCommandTests(TestCase):
         self.assertNotIn("--pipeline.datamanager.dataparser-type", cmd)
         self.assertNotIn("nerfstudio-data", cmd)
 
-    def test_build_command_ignores_explicit_dataparser_from_config(self) -> None:
+    def test_build_command_does_not_add_dataparser_from_config(self) -> None:
         self.run.config_json = {"dataparser_type": "blender-data"}
         runner = NerfstudioRunner()
         with patch.object(runner, "_resolve_binary", return_value="ns-train"):
