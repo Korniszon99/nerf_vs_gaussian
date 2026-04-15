@@ -53,17 +53,59 @@ class RunnerBuildCommandTests(TestCase):
 
     def test_build_command_with_max_iterations(self) -> None:
         self.run.config_json = {"max_num_iterations": 1000}
-        with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
-            cmd = NerfstudioRunner()._build_command(self.run)
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(self.run)
         self.assertIn("--max-num-iterations", cmd)
         self.assertIn("1000", cmd)
 
     def test_build_command_with_downscale_factor(self) -> None:
         self.run.config_json = {"downscale_factor": 2}
-        with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
-            cmd = NerfstudioRunner()._build_command(self.run)
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(self.run)
         self.assertIn("--pipeline.datamanager.camera-res-scale-factor", cmd)
         self.assertIn("2", cmd)
+
+    def test_auto_selects_nerfstudio_dataparser_for_colmap(self) -> None:
+        runner = NerfstudioRunner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            (tmp_path / "images").mkdir()
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
+            self.dataset.data_path = str(tmp_path)
+            self.dataset.save(update_fields=["data_path"])
+
+            with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+                cmd = runner._build_command(self.run)
+
+        self.assertIn("--pipeline.datamanager.dataparser-type", cmd)
+        self.assertIn("nerfstudio-data", cmd)
+
+    def test_build_command_uses_explicit_dataparser_from_config(self) -> None:
+        self.run.config_json = {"dataparser_type": "blender-data"}
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(self.run)
+
+        parser_flag_index = cmd.index("--pipeline.datamanager.dataparser-type")
+        self.assertEqual(cmd[parser_flag_index + 1], "blender-data")
+
+    def test_build_command_maps_vanilla_gs_to_splatfacto(self) -> None:
+        """vanilla-gaussian-splatting must be translated to splatfacto for ns-train."""
+        gs_run = ExperimentRun.objects.create(
+            name="test-gs",
+            dataset=self.dataset,
+            pipeline_type=ExperimentRun.PipelineType.VANILLA_GS,
+            output_dir="/tmp/out/run_gs",
+            config_json={},
+        )
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_resolve_binary", return_value="ns-train"):
+            cmd = runner._build_command(gs_run)
+
+        self.assertEqual(cmd[1], "splatfacto")
+        self.assertNotIn("vanilla-gaussian-splatting", cmd)
 
     def test_normalize_dataset_path_keeps_windows_absolute_path(self) -> None:
         runner = NerfstudioRunner()
@@ -146,6 +188,7 @@ class DatasetValidationTests(TestCase):
             images_dir = tmp_path / "images"
             images_dir.mkdir()
             (images_dir / "frame_001.jpg").write_text("fake image")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="valid-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -162,6 +205,7 @@ class DatasetValidationTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             (tmp_path / "frame_001.png").write_text("fake image")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="root-images-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -182,6 +226,7 @@ class DatasetValidationTests(TestCase):
             images_dir = dataset_dir / "images"
             images_dir.mkdir()
             (images_dir / "zdjęcie_001.tif").write_text("fake image")
+            (dataset_dir / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="polish-dataset", data_path=str(dataset_dir))
             run = ExperimentRun.objects.create(
@@ -219,6 +264,7 @@ class DatasetValidationTests(TestCase):
             (images_dir / "test.png").write_text("png")
             (images_dir / "test.tif").write_text("tif")
             (images_dir / "test.exr").write_text("exr")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
 
             dataset = Dataset.objects.create(name="multi-format-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -229,6 +275,26 @@ class DatasetValidationTests(TestCase):
 
             # Should not raise
             self.runner._validate_dataset_path(run)
+
+    def test_validate_dataset_path_rejects_missing_blender_and_colmap_layout(self) -> None:
+        """Validation rejects image-only dataset without Blender or COLMAP layout."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            images_dir.mkdir()
+            (images_dir / "frame_001.jpg").write_text("fake image")
+
+            dataset = Dataset.objects.create(name="unsupported-layout", data_path=str(tmp_path))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                self.runner._validate_dataset_path(run)
+
+            self.assertIn("must contain either Blender split files", str(ctx.exception))
 
 
 class RunnerExecutionTests(TestCase):

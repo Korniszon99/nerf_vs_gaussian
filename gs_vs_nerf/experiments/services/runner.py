@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 class NerfstudioRunner:
+    _BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
+
+    # Map Django model pipeline_type values to actual ns-train subcommand names.
+    # vanilla-gaussian-splatting is not a valid ns-train subcommand; splatfacto is.
+    _NS_TRAIN_METHOD_MAP: dict[str, str] = {
+        "vanilla-gaussian-splatting": "splatfacto",
+    }
+
     def __init__(self) -> None:
         self.bin_name = getattr(settings, "NERFSTUDIO_BIN", "ns-train")
 
@@ -170,6 +178,13 @@ class NerfstudioRunner:
                 f"Dataset contains no images. Checked: {images_dir} and root of {dataset_path}"
             )
 
+        if not self._has_blender_layout(dataset_path) and not self._has_colmap_layout(dataset_path):
+            expected = ", ".join(self._BLENDER_SPLIT_FILES)
+            raise ValueError(
+                "Dataset must contain either Blender split files "
+                f"({expected}) or a COLMAP reconstruction directory at dataset_root/sparse/0/ (see README)."
+            )
+
         logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
 
     def _normalize_dataset_path(self, raw_path: str) -> str:
@@ -204,7 +219,8 @@ class NerfstudioRunner:
         return f"ns-train failed with exit code {returncode}"
 
     def _build_command(self, run: ExperimentRun) -> list[str]:
-        pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
+        raw_pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
+        pipeline = self._NS_TRAIN_METHOD_MAP.get(raw_pipeline, raw_pipeline)
         cfg = run.config_json or {}
         binary = self._resolve_binary()
         dataset_path = self._normalize_dataset_path(str(run.dataset.data_path))
@@ -230,7 +246,42 @@ class NerfstudioRunner:
         if "downscale_factor" in cfg:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
 
+        dataparser_type = self._resolve_dataparser_type(run, Path(run.dataset.data_path))
+        if dataparser_type:
+            cmd.extend(["--pipeline.datamanager.dataparser-type", dataparser_type])
+
         return cmd
+
+    def _resolve_dataparser_type(self, run: ExperimentRun, dataset_path: Path) -> str | None:
+        """Resolve dataparser type from run config or dataset layout.
+
+        Args:
+            run: Experiment run that may contain explicit parser settings in config_json.
+            dataset_path: Absolute or relative path to dataset root on disk.
+
+        Returns:
+            str or None: Explicit parser type from config (supports `dataparser_type` and
+            legacy `dataparser`), `nerfstudio-data` for detected COLMAP layout, or ``None``
+            to keep Nerfstudio default (Blender parser).
+        """
+        cfg = run.config_json or {}
+        explicit = cfg.get("dataparser_type") or cfg.get("dataparser")
+        if explicit:
+            return str(explicit)
+
+        if self._has_colmap_layout(dataset_path):
+            return "nerfstudio-data"
+
+        return None
+
+    def _has_blender_layout(self, dataset_path: Path) -> bool:
+        """Return True if Blender split metadata files are present in dataset root."""
+        return all((dataset_path / file_name).is_file() for file_name in self._BLENDER_SPLIT_FILES)
+
+    def _has_colmap_layout(self, dataset_path: Path) -> bool:
+        """Return True if COLMAP sparse reconstruction directory exists at sparse/0."""
+        sparse_root = dataset_path / "sparse" / "0"
+        return sparse_root.is_dir()
 
     def _resolve_binary(self) -> str:
         candidate = Path(self.bin_name)

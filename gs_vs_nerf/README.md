@@ -196,6 +196,11 @@ Podczas tworzenia `ExperimentRun`:
 Runner mapuje te pola na argumenty CLI:
 - `max_num_iterations` -> `--max-num-iterations`
 - `downscale_factor` -> `--pipeline.datamanager.camera-res-scale-factor`
+- `dataparser_type` (opcjonalnie) -> `--pipeline.datamanager.dataparser-type`
+
+Runner automatycznie dobiera parser danych:
+- jeśli wykryje `sparse/0/` w datasetcie, ustawia `--pipeline.datamanager.dataparser-type nerfstudio-data` (COLMAP),
+- jeśli nie wykryje COLMAP, dataset musi mieć layout Blender (`transforms_train.json`, `transforms_test.json`, `transforms_val.json`) — w przeciwnym razie run zostanie odrzucony na walidacji.
 
 ## Runner CLI
 
