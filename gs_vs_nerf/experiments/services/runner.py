@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 class NerfstudioRunner:
     _BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
+    _NERFSTUDIO_TRANSFORMS_FILE = "transforms.json"
 
     # Map Django model pipeline_type values to actual ns-train subcommand names.
     # vanilla-gaussian-splatting is not a valid ns-train subcommand; splatfacto is.
@@ -178,14 +179,33 @@ class NerfstudioRunner:
                 f"Dataset contains no images. Checked: {images_dir} and root of {dataset_path}"
             )
 
-        if not self._has_blender_layout(dataset_path) and not self._has_colmap_layout(dataset_path):
-            expected = ", ".join(self._BLENDER_SPLIT_FILES)
-            raise ValueError(
-                "Dataset must contain either Blender split files "
-                f"({expected}) or a COLMAP reconstruction directory at dataset_root/sparse/0/ (see README)."
-            )
+        self._validate_pipeline_metadata(run, dataset_path)
 
         logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
+
+    def _validate_pipeline_metadata(self, run: ExperimentRun, dataset_path: Path) -> None:
+        """Validate metadata files required by selected Nerfstudio pipeline."""
+        raw_pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
+        pipeline = self._NS_TRAIN_METHOD_MAP.get(raw_pipeline, raw_pipeline)
+
+        if pipeline == "vanilla-nerf" and not self._has_blender_layout(dataset_path):
+            expected = ", ".join(self._BLENDER_SPLIT_FILES)
+            raise ValueError(
+                "vanilla-nerf requires Blender metadata files in dataset root: "
+                f"{expected}. The runner does not generate these files automatically."
+            )
+
+        if pipeline == "splatfacto" and not self._has_nerfstudio_layout(dataset_path):
+            message = (
+                "splatfacto requires Nerfstudio metadata file transforms.json in dataset root. "
+                "The runner does not generate this file automatically."
+            )
+            if self._has_colmap_layout(dataset_path):
+                message += (
+                    " Found COLMAP layout (sparse/0), so convert it first with ns-process-data "
+                    "to produce transforms.json."
+                )
+            raise ValueError(message)
 
     def _normalize_dataset_path(self, raw_path: str) -> str:
         """Normalize dataset path: resolve to absolute and convert backslash to forward slash."""
@@ -256,6 +276,10 @@ class NerfstudioRunner:
         """Return True if COLMAP sparse reconstruction directory exists at sparse/0."""
         sparse_root = dataset_path / "sparse" / "0"
         return sparse_root.is_dir()
+
+    def _has_nerfstudio_layout(self, dataset_path: Path) -> bool:
+        """Return True if Nerfstudio metadata file exists in dataset root."""
+        return (dataset_path / self._NERFSTUDIO_TRANSFORMS_FILE).is_file()
 
     def _resolve_binary(self) -> str:
         candidate = Path(self.bin_name)
