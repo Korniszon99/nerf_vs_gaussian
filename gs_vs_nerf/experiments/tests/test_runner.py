@@ -257,7 +257,7 @@ class DatasetValidationTests(TestCase):
             self.runner._validate_dataset_path(run)
 
     def test_validate_dataset_path_rejects_missing_blender_and_colmap_layout(self) -> None:
-        """Walidacja odrzuca katalog ze zdjęciami bez layoutu Blender lub COLMAP."""
+        """Validation rejects image-only dataset without Blender or COLMAP layout."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             images_dir = tmp_path / "images"

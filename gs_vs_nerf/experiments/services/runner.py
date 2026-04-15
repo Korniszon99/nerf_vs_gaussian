@@ -247,6 +247,7 @@ class NerfstudioRunner:
         return cmd
 
     def _resolve_dataparser_type(self, run: ExperimentRun, dataset_path: Path) -> str | None:
+        """Resolve dataparser type from config or dataset layout auto-detection."""
         cfg = run.config_json or {}
         explicit = cfg.get("dataparser_type") or cfg.get("dataparser")
         if explicit:
@@ -258,9 +259,11 @@ class NerfstudioRunner:
         return None
 
     def _has_blender_layout(self, dataset_path: Path) -> bool:
+        """Return True if Blender split metadata files are present in dataset root."""
         return all((dataset_path / file_name).is_file() for file_name in self._BLENDER_SPLIT_FILES)
 
     def _has_colmap_layout(self, dataset_path: Path) -> bool:
+        """Return True if COLMAP sparse reconstruction directory exists at sparse/0."""
         sparse_root = dataset_path / "sparse" / "0"
         return sparse_root.is_dir()
 
