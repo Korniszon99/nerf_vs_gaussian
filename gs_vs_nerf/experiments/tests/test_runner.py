@@ -188,7 +188,8 @@ class DatasetValidationTests(TestCase):
             images_dir = tmp_path / "images"
             images_dir.mkdir()
             (images_dir / "frame_001.jpg").write_text("fake image")
-            (tmp_path / "sparse" / "0").mkdir(parents=True)
+            for file_name in self.runner._BLENDER_SPLIT_FILES:
+                (tmp_path / file_name).write_text("{}")
 
             dataset = Dataset.objects.create(name="valid-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -205,7 +206,8 @@ class DatasetValidationTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             (tmp_path / "frame_001.png").write_text("fake image")
-            (tmp_path / "sparse" / "0").mkdir(parents=True)
+            for file_name in self.runner._BLENDER_SPLIT_FILES:
+                (tmp_path / file_name).write_text("{}")
 
             dataset = Dataset.objects.create(name="root-images-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -226,7 +228,8 @@ class DatasetValidationTests(TestCase):
             images_dir = dataset_dir / "images"
             images_dir.mkdir()
             (images_dir / "zdjęcie_001.tif").write_text("fake image")
-            (dataset_dir / "sparse" / "0").mkdir(parents=True)
+            for file_name in self.runner._BLENDER_SPLIT_FILES:
+                (dataset_dir / file_name).write_text("{}")
 
             dataset = Dataset.objects.create(name="polish-dataset", data_path=str(dataset_dir))
             run = ExperimentRun.objects.create(
@@ -264,7 +267,8 @@ class DatasetValidationTests(TestCase):
             (images_dir / "test.png").write_text("png")
             (images_dir / "test.tif").write_text("tif")
             (images_dir / "test.exr").write_text("exr")
-            (tmp_path / "sparse" / "0").mkdir(parents=True)
+            for file_name in self.runner._BLENDER_SPLIT_FILES:
+                (tmp_path / file_name).write_text("{}")
 
             dataset = Dataset.objects.create(name="multi-format-dataset", data_path=str(tmp_path))
             run = ExperimentRun.objects.create(
@@ -294,7 +298,67 @@ class DatasetValidationTests(TestCase):
             with self.assertRaises(ValueError) as ctx:
                 self.runner._validate_dataset_path(run)
 
-            self.assertIn("must contain either Blender split files", str(ctx.exception))
+            self.assertIn("vanilla-nerf requires Blender metadata files", str(ctx.exception))
+
+    def test_validate_dataset_path_rejects_vanilla_nerf_colmap_only_layout(self) -> None:
+        """vanilla-nerf powinien failować bez splitów transforms_* nawet z COLMAP sparse/0."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            images_dir.mkdir()
+            (images_dir / "frame_001.jpg").write_text("fake image")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
+
+            dataset = Dataset.objects.create(name="colmap-only-nerf", data_path=str(tmp_path))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                self.runner._validate_dataset_path(run)
+
+            self.assertIn("vanilla-nerf requires Blender metadata files", str(ctx.exception))
+
+    def test_validate_dataset_path_rejects_splatfacto_without_transforms_json(self) -> None:
+        """splatfacto powinien failować, gdy brakuje transforms.json."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            images_dir.mkdir()
+            (images_dir / "frame_001.jpg").write_text("fake image")
+            (tmp_path / "sparse" / "0").mkdir(parents=True)
+
+            dataset = Dataset.objects.create(name="colmap-only-gs", data_path=str(tmp_path))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_GS,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                self.runner._validate_dataset_path(run)
+
+            self.assertIn("splatfacto requires Nerfstudio metadata file transforms.json", str(ctx.exception))
+
+    def test_validate_dataset_path_accepts_splatfacto_with_transforms_json(self) -> None:
+        """splatfacto akceptuje dataset z images/ + transforms.json."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            images_dir.mkdir()
+            (images_dir / "frame_001.jpg").write_text("fake image")
+            (tmp_path / "transforms.json").write_text("{}")
+
+            dataset = Dataset.objects.create(name="ns-layout-gs", data_path=str(tmp_path))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_GS,
+            )
+
+            self.runner._validate_dataset_path(run)
 
 
 class RunnerExecutionTests(TestCase):

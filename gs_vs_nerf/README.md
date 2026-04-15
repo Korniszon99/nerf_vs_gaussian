@@ -139,9 +139,18 @@ Jeśli nie ustawisz `NERFSTUDIO_BIN`, backend zwykle probuje uzyc domyslnego `ns
 ns-train <pipeline_type> --data <Dataset.data_path> --output-dir <...>
 ```
 
-Dlatego `Dataset.data_path` musi wskazywac katalog datasetu kompatybilny z Nerfstudio.
+Dlatego `Dataset.data_path` musi wskazywac katalog datasetu kompatybilny z wybranym pipeline.
 
-Zalecany uklad (COLMAP):
+`vanilla-nerf`:
+- wymaga plikow Blender split w katalogu datasetu:
+  `transforms_train.json`, `transforms_test.json`, `transforms_val.json`
+
+`vanilla-gaussian-splatting` (mapowane na `splatfacto`):
+- wymaga pliku `transforms.json` w katalogu datasetu (format Nerfstudio)
+
+Runner **nie generuje** tych plikow automatycznie.
+
+Surowy uklad COLMAP (punkt wyjsciowy):
 
 ```text
 gs_vs_nerf/
@@ -162,6 +171,7 @@ Uwagi praktyczne:
 - Uzywaj prostych nazw plikow bez spacji i bez polskich znakow.
 - Dla datasetu `Iłża` obrazy sa w formacie `.tif` i taki layout jest wspierany.
 - Nazwy obrazow w `images.bin` musza odpowiadac fizycznym plikom w `images/`.
+- Samo `sparse/0` nie wystarczy do uruchomienia `ns-train` w tym MVP — najpierw przygotuj pliki `transforms*.json` (np. przez `ns-process-data`).
 
 ## Dostosowanie datasetu `Iłża`
 
@@ -199,8 +209,9 @@ Runner mapuje te pola na argumenty CLI:
 `dataparser_type` nie jest przekazywany do CLI, bo w nowszych wersjach Nerfstudio opcja
 `--pipeline.datamanager.dataparser-type` jest nierozpoznawana.
 
-Dataset nadal jest walidowany pod kątem układu COLMAP (`sparse/0/`) albo Blender
-(`transforms_train.json`, `transforms_test.json`, `transforms_val.json`) przed startem runa.
+Dataset jest walidowany przed startem runa:
+- `vanilla-nerf` -> wymagane `transforms_train.json`, `transforms_test.json`, `transforms_val.json`
+- `splatfacto` -> wymagane `transforms.json`
 
 ## Runner CLI
 
@@ -222,7 +233,7 @@ python manage.py test
 - `source` not recognized: w PowerShell aktywuj srodowisko przez `conda activate gs-nerf`, nie przez `source`.
 - `requirements.txt not found`: wejdz do katalogu `gs_vs_nerf` przed `pip install -r requirements.txt`.
 - `ns-train not found`: ustaw `NERFSTUDIO_BIN` albo dodaj Nerfstudio do `PATH`.
-- Run failuje zaraz po starcie: sprawdz czy `Dataset.data_path` wskazuje poprawny katalog i czy layout datasetu jest zgodny z sekcja powyzej.
+- Run failuje zaraz po starcie: sprawdz czy `Dataset.data_path` wskazuje poprawny katalog i czy istnieja wymagane pliki `transforms*.json` dla wybranego pipeline.
 - "Brak zdjęć w katalogu" przy importzie: system szuka `images/` wewnątrz folderu. Jeśli go nie ma, przeszukuje sam folder. Upewnij się, że zdjęcia są w jednym z tych miejsc.
 - Import pomija pliki: sprawdź, czy rozszerzenia są obsługiwane (`.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`, `.bmp`, `.gif`) i czy nazwy są ASCII (bez polskich znaków).
 
