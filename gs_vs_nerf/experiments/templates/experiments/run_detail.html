@@ -15,7 +15,7 @@
     <a href="{% url 'experiments:dashboard' %}" class="btn btn-outline-secondary btn-sm">Powrót</a>
 </div>
 
-<div class="alert alert-info">
+<div class="alert alert-{% if run.status == 'success' %}success{% elif run.status == 'failed' %}danger{% elif run.status == 'running' or run.status == 'pending' %}warning{% else %}secondary{% endif %}">
     <strong>Status:</strong>
     <span id="run-status-badge" data-run-status="{{ run.status }}" class="badge bg-{% if run.status == 'running' or run.status == 'pending' %}warning{% elif run.status == 'success' %}success{% elif run.status == 'failed' %}danger{% else %}secondary{% endif %}">
         {{ run.get_status_display }}
@@ -24,6 +24,9 @@
         <span class="spinner-border spinner-border-sm ms-2" role="status" aria-hidden="true"></span>
         <small class="ms-2">Strona odświeża się co 3 sekundy...</small>
     </span>
+    {% if run.status == 'failed' and run.error_message %}
+        <div class="mt-2"><strong>Błąd:</strong> <code id="run-error-message">{{ run.error_message }}</code></div>
+    {% endif %}
 </div>
 
 <div class="row mb-3">
@@ -52,10 +55,16 @@
         </div>
     </div>
     <div class="col-md-3">
-        {% if run.status == 'pending' %}
-            <form method="post" action="{% url 'experiments:run_start' run.pk %}" style="display: inline;">
+        {% if run.status == 'pending' or run.status == 'failed' or run.status == 'success' %}
+            <form method="post" action="{% url 'experiments:run_start' run.pk %}">
                 {% csrf_token %}
-                <button type="submit" class="btn btn-success w-100">Uruchom pipeline</button>
+                {% if run.status == 'failed' %}
+                    <button type="submit" class="btn btn-warning w-100">Ponów run</button>
+                {% elif run.status == 'success' %}
+                    <button type="submit" class="btn btn-outline-success w-100">Uruchom ponownie</button>
+                {% else %}
+                    <button type="submit" class="btn btn-success w-100">Uruchom pipeline</button>
+                {% endif %}
             </form>
         {% endif %}
     </div>
@@ -149,6 +158,13 @@
     const stdoutEl = document.getElementById('stdout-log');
     const stderrEl = document.getElementById('stderr-log');
     const durationEl = document.getElementById('run-duration');
+    const errorMsgEl = document.getElementById('run-error-message');
+
+    function alertClassForStatus(status) {
+        if (status === 'success') return 'alert alert-success';
+        if (status === 'failed') return 'alert alert-danger';
+        return 'alert alert-warning';
+    }
 
     function badgeClassForStatus(status) {
         if (status === 'running' || status === 'pending') return 'badge bg-warning';
@@ -162,6 +178,8 @@
         statusBadge.className = badgeClassForStatus(status);
         statusBadge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
         statusSpinner.classList.toggle('d-none', status !== 'running' && status !== 'pending');
+        const alertEl = statusBadge.closest('.alert');
+        if (alertEl) alertEl.className = alertClassForStatus(status);
     }
 
     function refreshLogs() {
@@ -175,6 +193,10 @@
                 }
                 if (data.status) {
                     renderStatus(data.status);
+                }
+                if (errorMsgEl && data.error_message !== undefined) {
+                    errorMsgEl.textContent = data.error_message || '';
+                    errorMsgEl.closest('div').classList.toggle('d-none', !data.error_message || data.status !== 'failed');
                 }
 
                 stdoutEl.scrollTop = stdoutEl.scrollHeight;
