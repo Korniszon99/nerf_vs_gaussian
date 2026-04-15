@@ -194,7 +194,7 @@ Podczas tworzenia `ExperimentRun`:
 ```
 
 Runner mapuje te pola na argumenty CLI:
-- `max_num_iterations` -> `--trainer.max-num-iterations`
+- `max_num_iterations` -> `--max-num-iterations`
 - `downscale_factor` -> `--pipeline.datamanager.camera-res-scale-factor`
 
 ## Runner CLI
