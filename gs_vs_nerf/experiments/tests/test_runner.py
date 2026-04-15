@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -494,6 +495,83 @@ class RunnerExecutionTests(TestCase):
         self.assertIn("C:\\tools\\ns-train.exe", self.run.command)
         self.assertIn("--output-dir", self.run.command)
         self.assertTrue(self.run.output_dir)
+
+    @patch("experiments.services.runner.collect_artifacts")
+    @patch("experiments.services.runner.collect_metrics")
+    @patch("experiments.services.runner.subprocess.run")
+    def test_run_triggers_preprocess_and_uses_preprocessed_data_path(
+        self,
+        mock_run,
+        _mock_metrics,
+        _mock_artifacts,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            dataset_path = tmp_path / "dataset"
+            (dataset_path / "images").mkdir(parents=True)
+            (dataset_path / "images" / "frame_001.jpg").write_text("fake image")
+
+            preprocessed_path = tmp_path / "preprocessed"
+            (preprocessed_path / "images").mkdir(parents=True)
+            (preprocessed_path / "images" / "frame_001.jpg").write_text("fake image")
+            (preprocessed_path / "transforms.json").write_text("{}")
+
+            self.dataset.data_path = str(dataset_path)
+            self.dataset.save(update_fields=["data_path"])
+            self.run.output_dir = str(tmp_path / "run_output")
+            self.run.save(update_fields=["output_dir"])
+
+            preprocess_stdout = json.dumps(
+                {"status": "created", "data_dir": str(preprocessed_path)}
+            ) + "\n"
+            mock_run.side_effect = [
+                self._make_mock_completed_process(preprocess_stdout, "", 0),
+                self._make_mock_completed_process("done\n", "", 0),
+            ]
+
+            runner = NerfstudioRunner()
+            runner.run(self.run)
+
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ExperimentRun.Status.SUCCESS)
+        self.assertEqual(mock_run.call_count, 2)
+
+        preprocess_command = mock_run.call_args_list[0].args[0]
+        train_command = mock_run.call_args_list[1].args[0]
+
+        self.assertIn("preprocess.py", str(preprocess_command[1]))
+        data_index = train_command.index("--data") + 1
+        expected_data_path = str(preprocessed_path.resolve()).replace("\\", "/")
+        self.assertEqual(train_command[data_index], expected_data_path)
+
+    @patch("experiments.services.runner.collect_artifacts")
+    @patch("experiments.services.runner.collect_metrics")
+    @patch("experiments.services.runner.subprocess.run")
+    def test_run_skips_preprocess_when_metadata_exists(self, mock_run, _mock_metrics, _mock_artifacts) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            dataset_path = tmp_path / "dataset"
+            (dataset_path / "images").mkdir(parents=True)
+            (dataset_path / "images" / "frame_001.jpg").write_text("fake image")
+            (dataset_path / "transforms.json").write_text("{}")
+
+            self.dataset.data_path = str(dataset_path)
+            self.dataset.save(update_fields=["data_path"])
+            self.run.output_dir = str(tmp_path / "run_output")
+            self.run.save(update_fields=["output_dir"])
+
+            mock_run.return_value = self._make_mock_completed_process("done\n", "", 0)
+
+            runner = NerfstudioRunner()
+            runner.run(self.run)
+
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ExperimentRun.Status.SUCCESS)
+        self.assertEqual(mock_run.call_count, 1)
+
+        train_command = mock_run.call_args_list[0].args[0]
+        self.assertIn("--data", train_command)
+        self.assertNotIn("preprocess.py", " ".join(train_command))
 
     @patch("experiments.services.runner.subprocess.run")
     def test_run_calls_subprocess_with_utf8_decoding_and_utf8_env(self, mock_run) -> None:

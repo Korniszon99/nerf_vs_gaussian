@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+# pyright: reportGeneralTypeIssues=false
+
+import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from shutil import which
+from typing import cast
 
 from django.conf import settings
 from django.utils import timezone
@@ -26,9 +31,11 @@ class NerfstudioRunner:
     _NS_TRAIN_METHOD_MAP: dict[str, str] = {
         "vanilla-gaussian-splatting": "splatfacto",
     }
+    _PREPROCESS_SCRIPT_NAME = "preprocess.py"
+    _PREPROCESSED_DATASET_DIR_NAME = "preprocessed_dataset"
 
     def __init__(self) -> None:
-        self.bin_name = getattr(settings, "NERFSTUDIO_BIN", "ns-train")
+        self.bin_name = str(getattr(settings, "NERFSTUDIO_BIN", "ns-train"))
 
     def _build_process_env(self) -> dict[str, str]:
         """Build process environment forcing UTF-8 I/O for subprocess execution."""
@@ -46,9 +53,9 @@ class NerfstudioRunner:
         run.ensure_output_dir(output_base)
         Path(run.output_dir).mkdir(parents=True, exist_ok=True)
 
-        # Validate dataset path before building command
+        # Validate/prepare dataset path before building command
         try:
-            self._validate_dataset_path(run)
+            prepared_dataset_path = self._prepare_dataset_for_run(run)
         except ValueError as exc:
             error_msg = f"Dataset validation failed: {exc}"
             logger.error("[Run %s] %s", run.pk, error_msg)
@@ -58,7 +65,7 @@ class NerfstudioRunner:
             run.save(update_fields=["status", "stderr_log", "finished_at", "error_message"])
             return run
 
-        command = self._build_command(run)
+        command = self._ns_train_args_for_dataset(run, str(prepared_dataset_path))
         run.command = self._command_to_string(command)
         run.stdout_log = ""
         run.stderr_log = ""
@@ -151,9 +158,49 @@ class NerfstudioRunner:
         logger.info("[Run %s] Completed in %.1fs", run.pk, elapsed)
         return run
 
+    def _prepare_dataset_for_run(self, run: ExperimentRun) -> Path:
+        """Validate dataset and auto-generate missing metadata when possible."""
+        dataset_path = Path(run.dataset.data_path)
+        try:
+            self._validate_dataset_path(run)
+            logger.info("[Run %s] Preprocessing skipped; required metadata already available.", run.pk)
+            return dataset_path
+        except ValueError:
+            self._validate_dataset_base(dataset_path)
+            if not self._pipeline_requires_preprocessing(run):
+                raise
+            if self._has_required_metadata_for_run(run, dataset_path):
+                raise
+
+            logger.info(
+                "[Run %s] Missing metadata detected for pipeline '%s'; triggering preprocessing.",
+                run.pk,
+                self._resolve_pipeline_name(run),
+            )
+
+        preprocessed_path, preprocess_status = self._run_preprocess_script(run, dataset_path)
+        self._validate_dataset_at_path(run, preprocessed_path)
+
+        logger.info(
+            "[Run %s] Preprocessing %s. Using dataset path: %s",
+            run.pk,
+            preprocess_status,
+            preprocessed_path,
+        )
+        return preprocessed_path
+
     def _validate_dataset_path(self, run: ExperimentRun) -> None:
         """Validate that dataset path exists and contains images."""
-        dataset_path = Path(run.dataset.data_path)
+        self._validate_dataset_at_path(run, Path(run.dataset.data_path))
+
+    def _validate_dataset_at_path(self, run: ExperimentRun, dataset_path: Path) -> None:
+        """Validate dataset structure and pipeline metadata for a specific path."""
+        self._validate_dataset_base(Path(dataset_path))
+        self._validate_pipeline_metadata(run, Path(dataset_path))
+
+    def _validate_dataset_base(self, dataset_path: Path) -> None:
+        """Validate generic dataset structure and image availability."""
+        dataset_path = Path(dataset_path)
         logger.debug("[_validate_dataset_path] Checking dataset at: %s", dataset_path)
 
         if not dataset_path.exists():
@@ -179,7 +226,6 @@ class NerfstudioRunner:
                 f"Dataset contains no images. Checked: {images_dir} and root of {dataset_path}"
             )
 
-        self._validate_pipeline_metadata(run, dataset_path)
 
         logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
 
@@ -192,14 +238,11 @@ class NerfstudioRunner:
             expected = ", ".join(self._BLENDER_SPLIT_FILES)
             raise ValueError(
                 "vanilla-nerf requires Blender metadata files in dataset root: "
-                f"{expected}. The runner does not generate these files automatically."
+                f"{expected}."
             )
 
         if pipeline == "splatfacto" and not self._has_nerfstudio_layout(dataset_path):
-            message = (
-                "splatfacto requires Nerfstudio metadata file transforms.json in dataset root. "
-                "The runner does not generate this file automatically."
-            )
+            message = "splatfacto requires Nerfstudio metadata file transforms.json in dataset root."
             if self._has_colmap_layout(dataset_path):
                 message += (
                     " Found COLMAP layout (sparse/0), so convert it first with ns-process-data "
@@ -221,7 +264,7 @@ class NerfstudioRunner:
             return str(raw_path).replace("\\", "/")
 
     def _command_to_string(self, command: list[str]) -> str:
-        return subprocess.list2cmdline(command)
+        return " ".join(command)
 
     def _read_text(self, path: Path) -> str:
         if not path.exists():
@@ -239,26 +282,27 @@ class NerfstudioRunner:
         return f"ns-train failed with exit code {returncode}"
 
     def _build_command(self, run: ExperimentRun) -> list[str]:
-        raw_pipeline = run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
-        pipeline = self._NS_TRAIN_METHOD_MAP.get(raw_pipeline, raw_pipeline)
+        return self._ns_train_args_for_dataset(run, str(run.dataset.data_path))
+
+    def _ns_train_args_for_dataset(self, run: ExperimentRun, data_dir_str: str) -> list[str]:
+        pipeline = self._resolve_pipeline_name(run)
         cfg = run.config_json or {}
-        binary = self._resolve_binary()
-        dataset_path = self._normalize_dataset_path(str(run.dataset.data_path))
-        output_path = str(Path(run.output_dir).resolve()).replace("\\", "/")
+        binary = str(self._resolve_binary())
+        dataset_path = str(data_dir_str).replace("\\", "/")
+        output_path = str(run.output_dir).replace("\\", "/")
 
         logger.debug("[_build_command] Dataset: %s", dataset_path)
         logger.debug("[_build_command] Output: %s", output_path)
 
-        cmd = [
-            binary,
-            pipeline,
-            "--data",
-            dataset_path,
-            "--output-dir",
-            output_path,
-            "--vis",
-            "viewer_legacy",
-        ]
+        cmd: list[str] = []
+        cmd.append(str(binary))
+        cmd.append(str(pipeline))
+        cmd.append("--data")
+        cmd.append(str(dataset_path))
+        cmd.append("--output-dir")
+        cmd.append(str(output_path))
+        cmd.append("--vis")
+        cmd.append("viewer_legacy")
 
         if "max_num_iterations" in cfg:
             cmd.extend(["--max-num-iterations", str(cfg["max_num_iterations"])])
@@ -267,6 +311,99 @@ class NerfstudioRunner:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
 
         return cmd
+
+    def _raw_pipeline_name(self, run: ExperimentRun) -> str:
+        """Return the pipeline name as stored in ExperimentRun."""
+        return run.pipeline_type.value if hasattr(run.pipeline_type, "value") else str(run.pipeline_type)
+
+    def _resolve_pipeline_name(self, run: ExperimentRun) -> str:
+        """Resolve ExperimentRun pipeline name to ns-train method name."""
+        raw_pipeline = self._raw_pipeline_name(run)
+        return self._NS_TRAIN_METHOD_MAP.get(raw_pipeline, raw_pipeline)
+
+
+    def _pipeline_requires_preprocessing(self, run: ExperimentRun) -> bool:
+        """Return True when pipeline metadata can be auto-generated by preprocess.py."""
+        pipeline = self._resolve_pipeline_name(run)
+        return pipeline in {"vanilla-nerf", "splatfacto"}
+
+    def _has_required_metadata_for_run(self, run: ExperimentRun, dataset_path: Path) -> bool:
+        """Return True when dataset contains required metadata for the selected pipeline."""
+        pipeline = self._resolve_pipeline_name(run)
+        if pipeline == "vanilla-nerf":
+            return self._has_blender_layout(dataset_path)
+        if pipeline == "splatfacto":
+            return self._has_nerfstudio_layout(dataset_path)
+        return True
+
+    def _run_preprocess_script(self, run: ExperimentRun, dataset_path: Path) -> tuple[Path, str]:
+        """Run standalone preprocessing script and return prepared dataset directory."""
+        preprocess_script = Path(settings.BASE_DIR) / self._PREPROCESS_SCRIPT_NAME
+        if not preprocess_script.is_file():
+            raise ValueError(f"Preprocess script not found: {preprocess_script}")
+
+        output_dataset_path = Path(run.output_dir) / self._PREPROCESSED_DATASET_DIR_NAME
+        skip_colmap = self._has_colmap_layout(dataset_path)
+        command = [
+            sys.executable,
+            str(preprocess_script),
+            "--input-dir",
+            str(dataset_path),
+            "--output-dir",
+            str(output_dataset_path),
+        ]
+        if skip_colmap:
+            command.append("--skip-colmap")
+
+        logger.info(
+            "[Run %s] Running preprocess script: input=%s output=%s skip_colmap=%s",
+            run.pk,
+            dataset_path,
+            output_dataset_path,
+            skip_colmap,
+        )
+
+        completed = subprocess.run(
+            command,
+            cwd=str(Path(run.output_dir).parent),
+            env=self._build_process_env(),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+
+        if completed.returncode != 0:
+            details = completed.stderr.strip() or completed.stdout.strip()
+            raise ValueError(f"Preprocess failed with exit code {completed.returncode}: {details}")
+
+        parsed_output = self._parse_preprocess_output(completed.stdout)
+        data_dir = parsed_output.get("output_dir") or parsed_output.get("data_dir") or str(output_dataset_path)
+        status = parsed_output.get("status", "created")
+        return Path(str(data_dir)), str(status)
+
+    def _parse_preprocess_output(self, stdout_text: str) -> dict[str, str]:
+        """Parse preprocess script stdout as JSON result object."""
+        stripped = stdout_text.strip()
+        if not stripped:
+            return {}
+
+        candidates = [stripped]
+        candidates.extend(line.strip() for line in stripped.splitlines()[::-1] if line.strip())
+
+        for candidate in candidates:
+            # Support prefixed status lines, e.g. "[preprocess] done: { ... }".
+            if "{" in candidate:
+                candidate = candidate[candidate.index("{") :]
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return {str(key): str(value) for key, value in parsed.items() if value is not None}
+
+        return {}
 
     def _has_blender_layout(self, dataset_path: Path) -> bool:
         """Return True if Blender split metadata files are present in dataset root."""
@@ -282,12 +419,11 @@ class NerfstudioRunner:
         return (dataset_path / self._NERFSTUDIO_TRANSFORMS_FILE).is_file()
 
     def _resolve_binary(self) -> str:
-        candidate = Path(self.bin_name)
-        if candidate.exists():
-            return str(candidate)
+        if any(sep in self.bin_name for sep in ("\\", "/")) or ":" in self.bin_name:
+            return self.bin_name
 
-        resolved = which(str(self.bin_name))
+        resolved = which(self.bin_name)
         if resolved:
             return resolved
 
-        return self.bin_name
+        return str(self.bin_name)

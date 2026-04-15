@@ -14,22 +14,22 @@ MVP Django application for comparing training time and quality metrics between `
 
 | Model | Key fields | Notes |
 |---|---|---|
-| `Dataset` | `name`, `scene_type`, `created_at` | Top-level container |
-| `ImageFrame` | `dataset`, `file_path`, `frame_index` | Raw input images |
-| `CameraPose` | `image_frame`, `rotation_matrix`, `translation_vector` | COLMAP / JSON import |
-| `ExperimentRun` | `dataset`, `method` (`vanilla-nerf`\|`vanilla-gaussian-splatting`), `status`, `config_json`, `stdout`, `stderr`, `started_at`, `finished_at` | Central run record |
-| `Metric` | `run`, `name`, `value`, `step` | `psnr`, `ssim`, `lpips`, `duration_sec` |
-| `Artifact` | `run`, `artifact_type`, `file_path` | `.ply`, `.splat`, `.ckpt`, `.pt`, `.mp4`, `.json` |
+| `Dataset` | `name`, `description`, `data_path`, `created_at` | Top-level container |
+| `ImageFrame` | `dataset`, `image_file`, `frame_index`, `created_at` | Raw input images |
+| `CameraPose` | `image`, `tx`, `ty`, `tz`, `qx`, `qy`, `qz`, `qw`, `created_at` | Per-image pose (translation + quaternion) |
+| `ExperimentRun` | `name`, `dataset`, `pipeline_type` (`vanilla-nerf`\|`vanilla-gaussian-splatting`), `status`, `command`, `config_json`, `output_dir`, `stdout_log`, `stderr_log`, `error_message`, `started_at`, `finished_at`, `created_at` | Central run record; statuses: `pending`/`running`/`success`/`failed` |
+| `Metric` | `run`, `name`, `value`, `step`, `created_at` | Includes `psnr`, `ssim`, `lpips`, `duration_sec` |
+| `Artifact` | `run`, `artifact_type`, `file_path`, `label`, `created_at` | `.ply`, `.splat`, `.ckpt`, `.pt`, `.mp4`, `.json` |
 
 ---
 
 ## Async execution model
 
-Runs are launched via `ThreadPoolExecutor` (in-process, MVP).  
-Command pattern: `ns-train {method} --data {dataset_path} [extra_args_from_config_json]`.
+Runs are launched in-process via `experiments/tasks.py` using `ThreadPoolExecutor(max_workers=2)`.  
+Command pattern: `ns-train {pipeline} --data {dataset_path} [known_extra_args_from_config_json]`.
 
 ```
-ExperimentRun → services/runner.py → subprocess (ns-train) → stdout/stderr → Metric + Artifact
+ExperimentRun → tasks.launch_run_async → ThreadPoolExecutor → tasks.execute_run → services/runner.NerfstudioRunner.run → subprocess (ns-train) → stdout/stderr → Metric + Artifact
 ```
 
 For production, replace with Celery or RQ (see `docs/architecture.md`).
@@ -40,11 +40,12 @@ For production, replace with Celery or RQ (see `docs/architecture.md`).
 
 ### 🤖 `experiment-runner`
 - Reads `ExperimentRun.config_json`
-- Builds `ns-train` CLI command
+- Builds `ns-train` CLI command (maps `vanilla-gaussian-splatting` → `splatfacto`)
+- Validates dataset layout (`images/` or root images) and required metadata files per pipeline
 - Captures stdout/stderr line-by-line
 - Parses metric lines → `Metric` objects
 - Detects output files → `Artifact` objects
-- Updates `ExperimentRun.status` (`pending` → `running` → `done`/`failed`)
+- Updates `ExperimentRun.status` (`pending` → `running` → `success`/`failed`)
 
 ### 🤖 `metric-extractor`
 - Parses Nerfstudio log format
@@ -60,6 +61,7 @@ For production, replace with Celery or RQ (see `docs/architecture.md`).
 - Serves `.ply` file URLs for Three.js frontend
 - Returns run metadata (metrics, status, artifacts) as JSON
 - Endpoint: `GET /api/runs/{run_id}/artifacts/`
+- Endpoint: `GET /api/runs/{run_id}/logs/`
 
 ---
 
@@ -129,9 +131,10 @@ See `.github/skills/` for reusable workflows:
 ## Conventions
 
 - **No direct shell calls** from views — always go through `services/runner.py`
-- **Config JSON** is validated against a schema before run starts (see `skills/config-schema.md`)
+- **Config JSON** is parsed in forms; runner currently applies known keys (e.g. `max_num_iterations`, `downscale_factor`)
 - **Migrations** are committed; never edit existing ones
-- **Tests** in `tests/` — run via `python manage.py test`
+- **Tests** in `experiments/tests/` — run via `python manage.py test` (from Django project directory with `manage.py`)
+- **Debug run command**: `python manage.py run_experiment <run_id>`
 - Env var `NERFSTUDIO_BIN` overrides the `ns-train` binary path
 
 ---
