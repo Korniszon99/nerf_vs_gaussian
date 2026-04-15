@@ -425,7 +425,7 @@ def _looks_like_ffmpeg_processing_failure(completed: subprocess.CompletedProcess
     stderr_text = completed.stderr or ""
     stdout_text = completed.stdout or ""
     failure_output = (stderr_text + "\n" + stdout_text).lower()
-    return "ffmpeg" in failure_output and "error running command" in failure_output
+    return "error running command: ffmpeg" in failure_output
 
 
 def _can_retry_with_staging_root(retried_input_dir: Path) -> bool:
