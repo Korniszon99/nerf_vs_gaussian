@@ -44,8 +44,9 @@ class ViewTests(TestCase):
         launcher.assert_called_once_with(run.pk)
         run.refresh_from_db()
         self.assertEqual(run.status, ExperimentRun.Status.PENDING)
-        self.assertIsNotNone(run.started_at)
-        self.assertEqual(run.finished_at, None)
+        # started_at is reset to None by the view; the runner sets it when it actually begins
+        self.assertIsNone(run.started_at)
+        self.assertIsNone(run.finished_at)
         self.assertEqual(run.error_message, "")
 
     @patch("experiments.views.launch_run_async", side_effect=RuntimeError("boom"))
@@ -65,6 +66,50 @@ class ViewTests(TestCase):
         self.assertEqual(run.status, ExperimentRun.Status.FAILED)
         self.assertEqual(run.error_message, "Failed to start run asynchronously")
         self.assertIsNotNone(run.finished_at)
+
+    @patch("experiments.views.launch_run_async")
+    def test_run_start_retries_failed_run(self, launcher):
+        """Ponowne uruchomienie failed runa powinno wyczyścić logi i status."""
+        from django.utils import timezone
+        run = ExperimentRun.objects.create(
+            name="test-retry",
+            dataset=self.dataset,
+            pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            status=ExperimentRun.Status.FAILED,
+            error_message="previous error",
+            stdout_log="old stdout",
+            stderr_log="old stderr",
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+        )
+        ImageFrame.objects.create(dataset=self.dataset, image_file="img.jpg", frame_index=1)
+
+        response = self.client.post(reverse("experiments:run_start", kwargs={"pk": run.pk}))
+
+        self.assertEqual(response.status_code, 302)
+        launcher.assert_called_once_with(run.pk)
+        run.refresh_from_db()
+        self.assertEqual(run.status, ExperimentRun.Status.PENDING)
+        self.assertIsNone(run.started_at)
+        self.assertIsNone(run.finished_at)
+        self.assertEqual(run.error_message, "")
+        self.assertEqual(run.stdout_log, "")
+        self.assertEqual(run.stderr_log, "")
+
+    def test_run_detail_shows_retry_button_for_failed_run(self):
+        """Test że strona run_detail zawiera przycisk 'Ponów' dla failed runa."""
+        run = ExperimentRun.objects.create(
+            name="test-failed-button",
+            dataset=self.dataset,
+            pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            status=ExperimentRun.Status.FAILED,
+            error_message="ns-train failed",
+        )
+
+        response = self.client.get(reverse("experiments:run_detail", kwargs={"pk": run.pk}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Ponów run")
 
     def test_run_start_rejects_dataset_without_images(self):
         """Test że run_start pokazuje error jeśli dataset nie ma zdjęć."""

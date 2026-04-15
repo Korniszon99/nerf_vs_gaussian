@@ -139,13 +139,14 @@ def run_start(request, pk: int):
         messages.error(request, "Dataset nie zawiera żadnych zdjęć — nie można uruchomić runa. Zaimportuj najpierw zdjęcia.")
     else:
         try:
-            # Najpierw pokaż stan oczekiwania w UI, potem przejdź do uruchomienia async.
+            # Reset run state before (re)launch — clear previous results and logs.
             run.status = ExperimentRun.Status.PENDING
-            if run.started_at is None:
-                run.started_at = timezone.now()
-            run.error_message = ""
+            run.started_at = None
             run.finished_at = None
-            run.save(update_fields=["status", "started_at", "error_message", "finished_at"])
+            run.error_message = ""
+            run.stdout_log = ""
+            run.stderr_log = ""
+            run.save(update_fields=["status", "started_at", "finished_at", "error_message", "stdout_log", "stderr_log"])
 
             launch_run_async(run.pk)
             messages.success(request, "Run został uruchomiony asynchronicznie.")

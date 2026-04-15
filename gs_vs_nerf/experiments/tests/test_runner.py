@@ -55,7 +55,7 @@ class RunnerBuildCommandTests(TestCase):
         self.run.config_json = {"max_num_iterations": 1000}
         with patch.object(NerfstudioRunner(), "_resolve_binary", return_value="ns-train"):
             cmd = NerfstudioRunner()._build_command(self.run)
-        self.assertIn("--trainer.max-num-iterations", cmd)
+        self.assertIn("--max-num-iterations", cmd)
         self.assertIn("1000", cmd)
 
     def test_build_command_with_downscale_factor(self) -> None:
