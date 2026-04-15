@@ -246,33 +246,7 @@ class NerfstudioRunner:
         if "downscale_factor" in cfg:
             cmd.extend(["--pipeline.datamanager.camera-res-scale-factor", str(cfg["downscale_factor"])])
 
-        dataparser_type = self._resolve_dataparser_type(run, Path(run.dataset.data_path))
-        if dataparser_type:
-            cmd.extend(["--pipeline.datamanager.dataparser-type", dataparser_type])
-
         return cmd
-
-    def _resolve_dataparser_type(self, run: ExperimentRun, dataset_path: Path) -> str | None:
-        """Resolve dataparser type from run config or dataset layout.
-
-        Args:
-            run: Experiment run that may contain explicit parser settings in config_json.
-            dataset_path: Absolute or relative path to dataset root on disk.
-
-        Returns:
-            str or None: Explicit parser type from config (supports `dataparser_type` and
-            legacy `dataparser`), `nerfstudio-data` for detected COLMAP layout, or ``None``
-            to keep Nerfstudio default (Blender parser).
-        """
-        cfg = run.config_json or {}
-        explicit = cfg.get("dataparser_type") or cfg.get("dataparser")
-        if explicit:
-            return str(explicit)
-
-        if self._has_colmap_layout(dataset_path):
-            return "nerfstudio-data"
-
-        return None
 
     def _has_blender_layout(self, dataset_path: Path) -> bool:
         """Return True if Blender split metadata files are present in dataset root."""
