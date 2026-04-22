@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ NERFSTUDIO_TRANSFORMS_FILE = "transforms.json"
 BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".exr"}
 TIFF_IMAGE_EXTENSIONS = {".tif", ".tiff"}
+COLMAP_REQUIRED_BASENAMES = ("cameras", "images", "points3D")
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,14 @@ def preprocess_dataset(input_dir: Path, output_dir: Path, skip_colmap_flag: bool
 
     transforms_path = output_dir / NERFSTUDIO_TRANSFORMS_FILE
     transforms_data = load_transforms_json(transforms_path)
+    _rewrite_frame_file_paths_to_source_images(
+        transforms_data=transforms_data,
+        input_dir=input_dir,
+        output_dir=output_dir,
+    )
+    save_transforms_json(transforms_path=transforms_path, transforms_data=transforms_data)
+    _create_png_companion_files(transforms_data=transforms_data)
+
     write_blender_split_files(transforms_data=transforms_data, output_dir=output_dir)
 
 
@@ -91,9 +101,17 @@ def should_skip_colmap(input_dir: Path, skip_colmap_flag: bool) -> bool:
     Returns:
         True if COLMAP should be skipped.
     """
+    has_colmap_results = _has_colmap_results(input_dir)
+    if skip_colmap_flag and not has_colmap_results:
+        logger.warning(
+            "--skip-colmap requested, but COLMAP results are incomplete in %s. "
+            "Required files: cameras/images/points3D (.bin or .txt). Running COLMAP instead.",
+            input_dir / "sparse" / "0",
+        )
+        return False
     if skip_colmap_flag:
         return True
-    return (input_dir / "sparse" / "0").is_dir()
+    return has_colmap_results
 
 
 def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) -> None:
@@ -117,6 +135,10 @@ def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) ->
     ]
     if skip_colmap:
         command.append("--skip-colmap")
+        colmap_model_path = _resolve_colmap_model_path(process_input_dir)
+        if colmap_model_path is not None:
+            command.extend(["--colmap-model-path", str(colmap_model_path)])
+            logger.info("Using COLMAP model path for --skip-colmap: %s", colmap_model_path)
     if _should_disable_fast_image_processing(input_dir=input_dir):
         command.append("--no-same-dimensions")
 
@@ -124,26 +146,34 @@ def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) ->
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
 
     retried_input_dir: Path | None = None
-    last_attempt_input_dir = process_input_dir
+    last_attempt_input_dir: Path = process_input_dir
     if completed.returncode != 0 and _can_retry_with_windows_staging(process_input_dir):
         retried_input_dir = _prepare_windows_input_staging(
             input_dir=input_dir,
             process_input_dir=process_input_dir,
             skip_colmap=skip_colmap,
         )
-        if retried_input_dir != process_input_dir:
-            retry_command = _replace_data_arg(command, retried_input_dir)
+        if retried_input_dir is not None and retried_input_dir != process_input_dir:
+            retry_input_dir: Path = retried_input_dir
+            retry_staging_root = _resolve_retry_staging_root(retry_input_dir)
+            retry_command = _ensure_skip_colmap_flag(
+                _replace_data_and_colmap_args(command, retry_input_dir),
+                retry_staging_root,
+            )
             logger.warning(
                 "ns-process-data failed on initial input. Retrying with sanitized staging directory: %s",
-                retried_input_dir,
+                retry_input_dir,
             )
             logger.info("Retry command: %s", subprocess.list2cmdline(retry_command))
             completed = subprocess.run(retry_command, text=True, capture_output=True, check=False)
-            last_attempt_input_dir = retried_input_dir
+            last_attempt_input_dir = retry_input_dir
 
-            if completed.returncode != 0 and _can_retry_with_staging_root(retried_input_dir):
-                staging_root = retried_input_dir.parent
-                root_retry_command = _replace_data_arg(command, staging_root)
+            if completed.returncode != 0 and _can_retry_with_staging_root(retry_input_dir):
+                staging_root = retry_input_dir.parent
+                root_retry_command = _ensure_skip_colmap_flag(
+                    _replace_data_and_colmap_args(command, staging_root),
+                    staging_root,
+                )
                 logger.warning(
                     "Retry on staged images directory failed. Retrying once with staging root: %s",
                     staging_root,
@@ -158,7 +188,7 @@ def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) ->
         and _looks_like_ffmpeg_processing_failure(completed)
     ):
         skip_processing_command = _with_skip_image_processing_flag(
-            _replace_data_arg(command, last_attempt_input_dir)
+            _replace_data_and_colmap_args(command, last_attempt_input_dir)
         )
         logger.warning(
             "Detected ffmpeg processing failure on Windows. Retrying once with --skip-image-processing."
@@ -181,7 +211,14 @@ def run_ns_process_data(input_dir: Path, output_dir: Path, skip_colmap: bool) ->
             f"exit code {completed.returncode}. Details: {details}"
         )
 
-    logger.info("transforms.json generation completed.")
+    transforms_path = _ensure_metadata_in_output_dir(
+        output_dir=output_dir,
+        source_dir=last_attempt_input_dir,
+        process_output=completed,
+        skip_colmap=skip_colmap,
+        input_dir=input_dir,
+    )
+    logger.info("transforms.json generation completed at: %s", transforms_path)
 
 
 def _ensure_ffmpeg_available() -> None:
@@ -209,7 +246,16 @@ def _resolve_ns_process_data_input_dir(input_dir: Path) -> Path:
     ``ns-process-data`` can still see the reconstruction metadata instead of
     hiding it behind the ``images/`` subdirectory.
     """
-    if (input_dir / "sparse" / "0").is_dir():
+    # Guard for callers that accidentally pass dataset/images while sparse/0 lives one level above.
+    if input_dir.name.lower() == "images" and _has_colmap_sparse_directory(input_dir.parent):
+        logger.warning(
+            "Input directory points to images/, but COLMAP sparse/0 exists in parent. "
+            "Using dataset root instead: %s",
+            input_dir.parent,
+        )
+        return input_dir.parent
+
+    if _has_colmap_sparse_directory(input_dir):
         return input_dir
 
     images_dir = input_dir / "images"
@@ -274,10 +320,20 @@ def _prepare_windows_input_staging(
     destination_images_dir = staging_root / "images"
     destination_images_dir.mkdir(parents=True, exist_ok=True)
 
-    for index, source_file in enumerate(image_files):
-        _stage_windows_image(source_file=source_file, destination_images_dir=destination_images_dir, index=index)
+    has_complete_colmap_results = _has_colmap_results(input_dir)
+    if has_complete_colmap_results:
+        # Keep original filenames to preserve exact COLMAP image references.
+        for source_file in image_files:
+            shutil.copy2(source_file, destination_images_dir / source_file.name)
+        logger.info(
+            "Detected complete COLMAP results. Windows staging preserves original image names: %s",
+            staging_root,
+        )
+    else:
+        for index, source_file in enumerate(image_files):
+            _stage_windows_image(source_file=source_file, destination_images_dir=destination_images_dir, index=index)
 
-    if skip_colmap and (input_dir / "sparse" / "0").is_dir():
+    if _has_colmap_sparse_directory(input_dir):
         source_sparse = input_dir / "sparse"
         destination_sparse = staging_root / "sparse"
         shutil.copytree(source_sparse, destination_sparse, dirs_exist_ok=True)
@@ -288,7 +344,7 @@ def _prepare_windows_input_staging(
         len(image_files),
     )
 
-    if skip_colmap and (staging_root / "sparse" / "0").is_dir():
+    if _has_colmap_sparse_directory(staging_root):
         return staging_root
     return destination_images_dir
 
@@ -347,11 +403,16 @@ def _stage_windows_image(source_file: Path, destination_images_dir: Path, index:
 
 def _convert_tiff_to_png(source_file: Path, destination_file: Path) -> bool:
     """Convert a TIFF image to PNG using Pillow when available."""
+    return _convert_image_to_png(source_file=source_file, destination_file=destination_file)
+
+
+def _convert_image_to_png(source_file: Path, destination_file: Path) -> bool:
+    """Convert an image file to PNG using Pillow when available."""
     try:
         from PIL import Image  # type: ignore[import-not-found]
     except ImportError:
         logger.warning(
-            "Pillow is not installed, cannot convert TIFF to PNG during staging: %s",
+            "Pillow is not installed, cannot convert image to PNG: %s",
             source_file,
         )
         return False
@@ -364,6 +425,45 @@ def _convert_tiff_to_png(source_file: Path, destination_file: Path) -> bool:
         return False
 
     return True
+
+
+def _create_png_companion_files(transforms_data: dict[str, Any]) -> None:
+    """Create `<file_path>.png` companion images next to source files.
+
+    Some Blender-oriented loaders look for `<file_path>.png`. This keeps vanilla-nerf
+    compatibility without copying dataset images into run directories.
+    """
+    frames_data = transforms_data.get("frames", [])
+    if not isinstance(frames_data, list):
+        logger.warning("Skipping PNG companion creation: transforms.json frames are invalid")
+        return
+
+    created_count = 0
+    for frame in frames_data:
+        if not isinstance(frame, dict):
+            logger.warning("Skipping frame without dict payload in transforms.json: %r", frame)
+            continue
+
+        file_path_value = frame.get("file_path")
+        if not isinstance(file_path_value, str) or not file_path_value:
+            logger.warning("Skipping frame without valid file_path in transforms.json: %r", frame)
+            continue
+
+        source_file = Path(file_path_value)
+        companion_file = Path(f"{file_path_value}.png")
+        if companion_file.exists():
+            continue
+        if not source_file.is_file():
+            logger.warning("Source frame missing for PNG companion creation: %s", source_file)
+            continue
+
+        companion_file.parent.mkdir(parents=True, exist_ok=True)
+        if _convert_image_to_png(source_file=source_file, destination_file=companion_file):
+            created_count += 1
+        else:
+            logger.warning("Failed to create PNG companion file for frame: %s", source_file)
+
+    logger.info("Created %d PNG companion files based on transforms.json", created_count)
 
 
 def _list_supported_images(image_dir: Path) -> list[Path]:
@@ -413,6 +513,69 @@ def _replace_data_arg(command: list[str], data_dir: Path) -> list[str]:
     return updated
 
 
+def _resolve_colmap_model_path(process_input_dir: Path) -> Path | None:
+    """Return existing sparse/0 path for ``--colmap-model-path`` resolution."""
+    direct_sparse = process_input_dir / "sparse" / "0"
+    if direct_sparse.is_dir():
+        return direct_sparse
+
+    if process_input_dir.name.lower() == "images":
+        parent_sparse = process_input_dir.parent / "sparse" / "0"
+        if parent_sparse.is_dir():
+            return parent_sparse
+
+    return None
+
+
+def _replace_data_and_colmap_args(command: list[str], data_dir: Path) -> list[str]:
+    """Return command copy with updated ``--data`` and matching ``--colmap-model-path``.
+
+    If ``--colmap-model-path`` is present but no existing sparse/0 can be resolved for
+    ``data_dir``, the flag is removed to avoid stale dataset paths during retries.
+    """
+    updated = _replace_data_arg(command, data_dir)
+    if "--colmap-model-path" not in updated:
+        return updated
+
+    flag_index = updated.index("--colmap-model-path")
+    value_index = flag_index + 1
+    resolved_colmap_path = _resolve_colmap_model_path(data_dir)
+    if resolved_colmap_path is None:
+        # Drop stale value instead of pointing to original dataset after retry data swap.
+        if value_index < len(updated):
+            del updated[value_index]
+        del updated[flag_index]
+        return updated
+
+    if value_index < len(updated):
+        updated[value_index] = str(resolved_colmap_path)
+    else:
+        updated.append(str(resolved_colmap_path))
+    logger.info("Using COLMAP model path for retry: %s", resolved_colmap_path)
+    return updated
+
+
+def _resolve_retry_staging_root(retried_input_dir: Path) -> Path:
+    """Return staging root regardless of whether retry input points to root or images/."""
+    if retried_input_dir.name.lower() == "images":
+        return retried_input_dir.parent
+    return retried_input_dir
+
+
+def _ensure_skip_colmap_flag(command: list[str], staging_root: Path) -> list[str]:
+    """Return command copy with ``--skip-colmap`` added when staging has complete COLMAP results."""
+    if "--skip-colmap" in command:
+        return command[:]
+    if not _has_colmap_results(staging_root):
+        return command[:]
+
+    logger.info(
+        "Detected complete COLMAP results in staging root. Enabling --skip-colmap for retry: %s",
+        staging_root,
+    )
+    return [*command, "--skip-colmap"]
+
+
 def _with_skip_image_processing_flag(command: list[str]) -> list[str]:
     """Return command copy with `--skip-image-processing` appended when absent."""
     if "--skip-image-processing" in command:
@@ -442,6 +605,104 @@ def _can_retry_with_staging_root(retried_input_dir: Path) -> bool:
     return retried_input_dir.name.lower() == "images" and is_staging_parent
 
 
+def _has_colmap_results(dataset_dir: Path) -> bool:
+    """Return True when sparse/0 contains all required COLMAP result files."""
+    sparse_root = dataset_dir / "sparse" / "0"
+    if not sparse_root.is_dir():
+        return False
+
+    return not _missing_colmap_result_files(sparse_root)
+
+
+def _has_colmap_sparse_directory(dataset_dir: Path) -> bool:
+    """Return True when COLMAP sparse directory exists at sparse/0."""
+    return (dataset_dir / "sparse" / "0").is_dir()
+
+
+def _missing_colmap_result_files(sparse_root: Path) -> list[str]:
+    """Return missing required COLMAP file basenames in sparse/0."""
+    missing: list[str] = []
+    for base_name in COLMAP_REQUIRED_BASENAMES:
+        has_bin = (sparse_root / f"{base_name}.bin").is_file()
+        has_txt = (sparse_root / f"{base_name}.txt").is_file()
+        if not (has_bin or has_txt):
+            missing.append(base_name)
+    return missing
+
+
+def _discover_transforms_candidates(output_dir: Path, source_dir: Path) -> list[Path]:
+    """Return candidate transforms.json paths from output and staging locations."""
+    candidates = [
+        output_dir / NERFSTUDIO_TRANSFORMS_FILE,
+        source_dir / NERFSTUDIO_TRANSFORMS_FILE,
+        source_dir.parent / NERFSTUDIO_TRANSFORMS_FILE,
+    ]
+
+    for nested in source_dir.rglob(NERFSTUDIO_TRANSFORMS_FILE):
+        if nested not in candidates:
+            candidates.append(nested)
+
+    for nested in output_dir.rglob(NERFSTUDIO_TRANSFORMS_FILE):
+        if nested not in candidates:
+            candidates.append(nested)
+
+    return candidates
+
+
+def _ensure_metadata_in_output_dir(
+    output_dir: Path,
+    source_dir: Path,
+    process_output: subprocess.CompletedProcess[str],
+    skip_colmap: bool,
+    input_dir: Path,
+) -> Path:
+    """Ensure transforms.json exists in output_dir by copying from source if needed.
+    
+    On Windows with staging directories, ns-process-data may generate transforms.json
+    in the staging directory but fail to copy it to the final output_dir. This function
+    locates and copies the file when necessary.
+    
+    Args:
+        output_dir: The target output directory where transforms.json should exist.
+        source_dir: The directory where ns-process-data was executed (staging or original).
+    """
+    output_transforms = output_dir / NERFSTUDIO_TRANSFORMS_FILE
+    for candidate in _discover_transforms_candidates(output_dir=output_dir, source_dir=source_dir):
+        if not candidate.is_file():
+            continue
+
+        if candidate == output_transforms:
+            logger.debug("transforms.json already exists in output_dir: %s", output_transforms)
+            return output_transforms
+
+        logger.info("Copying transforms.json to output directory: %s -> %s", candidate, output_transforms)
+        shutil.copy2(candidate, output_transforms)
+        return output_transforms
+
+    diagnostics: list[str] = [
+        f"output_dir={output_dir}",
+        f"source_dir={source_dir}",
+    ]
+    if skip_colmap:
+        sparse_root = input_dir / "sparse" / "0"
+        missing_files = _missing_colmap_result_files(sparse_root)
+        if missing_files:
+            diagnostics.append(
+                "skip_colmap=True but missing COLMAP files in sparse/0: " + ", ".join(missing_files)
+            )
+
+    process_text = f"{process_output.stdout}\n{process_output.stderr}".lower()
+    if "not generating transforms.json" in process_text:
+        diagnostics.append(
+            "ns-process-data reported that transforms.json was not generated; verify COLMAP results are complete"
+        )
+
+    raise FileNotFoundError(
+        "ns-process-data completed but transforms.json was not found in output. "
+        + "; ".join(diagnostics)
+    )
+
+
 def load_transforms_json(transforms_path: Path) -> dict[str, Any]:
     """Load and validate transforms.json produced by ns-process-data.
 
@@ -461,6 +722,97 @@ def load_transforms_json(transforms_path: Path) -> dict[str, Any]:
 
     logger.info("Loaded %d frames from %s.", len(frames), transforms_path.name)
     return transforms_data
+
+
+def save_transforms_json(transforms_path: Path, transforms_data: dict[str, Any]) -> None:
+    """Persist updated transforms metadata to disk.
+
+    Args:
+        transforms_path: Destination path for transforms.json.
+        transforms_data: Parsed and updated transforms payload.
+    """
+    transforms_path.write_text(json.dumps(transforms_data, indent=2), encoding="utf-8")
+    logger.info("Saved updated transforms metadata: %s", transforms_path)
+
+
+def _rewrite_frame_file_paths_to_source_images(
+    transforms_data: dict[str, Any],
+    input_dir: Path,
+    output_dir: Path,
+) -> None:
+    """Rewrite transforms frame paths to source dataset files.
+
+    Preprocessed run directories keep only JSON metadata; image paths should point to
+    original dataset files.
+    """
+    frames_data = transforms_data.get("frames", [])
+    if not isinstance(frames_data, list):
+        logger.warning("Skipping frame path rewrite: transforms.json frames are invalid")
+        return
+
+    source_images_dir = _resolve_image_directory(input_dir)
+    rewritten_count = 0
+    missing_count = 0
+
+    for frame in frames_data:
+        if not isinstance(frame, dict):
+            logger.warning("Skipping frame without dict payload in transforms.json: %r", frame)
+            continue
+
+        file_path_value = frame.get("file_path")
+        if not isinstance(file_path_value, str) or not file_path_value:
+            logger.warning("Skipping frame without valid file_path in transforms.json: %r", frame)
+            continue
+
+        resolved_source = _resolve_source_frame_path(
+            file_path_value=file_path_value,
+            input_dir=input_dir,
+            source_images_dir=source_images_dir,
+            output_dir=output_dir,
+        )
+        if resolved_source is None:
+            missing_count += 1
+            logger.warning("Could not resolve source frame for transforms path: %s", file_path_value)
+            continue
+
+        frame["file_path"] = str(resolved_source.resolve())
+        rewritten_count += 1
+
+    logger.info(
+        "Rewrote %d frame paths to source dataset files (%d unresolved)",
+        rewritten_count,
+        missing_count,
+    )
+
+
+def _resolve_source_frame_path(
+    file_path_value: str,
+    input_dir: Path,
+    source_images_dir: Path,
+    output_dir: Path,
+) -> Path | None:
+    """Resolve one transforms frame path to an existing source image path."""
+    file_path = Path(file_path_value)
+    candidates: list[Path] = []
+
+    if file_path.is_absolute():
+        candidates.append(file_path)
+    else:
+        candidates.extend(
+            [
+                output_dir / file_path,
+                source_images_dir / file_path,
+                source_images_dir / file_path.name,
+                input_dir / file_path,
+                input_dir / file_path.name,
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
 
 
 def split_frames(frames: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -489,8 +841,41 @@ def build_split_payload(base_metadata: dict[str, Any], split_frames_data: list[d
         Metadata dictionary with preserved top-level fields and split frames.
     """
     payload = dict(base_metadata)
+    _inject_camera_angle_x_if_missing(payload)
     payload["frames"] = split_frames_data
     return payload
+
+
+def _inject_camera_angle_x_if_missing(payload: dict[str, Any]) -> None:
+    """Ensure Blender split payload includes ``camera_angle_x`` when derivable.
+
+    If ``camera_angle_x`` is missing, derive it from ``fl_x`` and image width ``w``:
+    ``2 * atan(w / (2 * fl_x))``.
+    """
+    if "camera_angle_x" in payload:
+        return
+
+    fl_x_value = payload.get("fl_x")
+    width_value = payload.get("w")
+    if fl_x_value is None or width_value is None:
+        logger.warning(
+            "Split payload missing camera_angle_x and cannot derive it because fl_x or w is absent."
+        )
+        return
+
+    try:
+        fl_x = float(fl_x_value)
+        width = float(width_value)
+        if fl_x <= 0:
+            raise ValueError("fl_x must be > 0")
+        payload["camera_angle_x"] = 2.0 * math.atan(width / (2.0 * fl_x))
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "Split payload missing camera_angle_x and derivation from fl_x=%r, w=%r failed: %s",
+            fl_x_value,
+            width_value,
+            exc,
+        )
 
 
 def write_blender_split_files(transforms_data: dict[str, Any], output_dir: Path) -> None:

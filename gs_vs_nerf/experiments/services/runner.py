@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 class NerfstudioRunner:
     _BLENDER_SPLIT_FILES = ("transforms_train.json", "transforms_test.json", "transforms_val.json")
     _NERFSTUDIO_TRANSFORMS_FILE = "transforms.json"
+    _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".exr"}
 
     # Map Django model pipeline_type values to actual ns-train subcommand names.
     # vanilla-gaussian-splatting is not a valid ns-train subcommand; splatfacto is.
@@ -33,6 +34,7 @@ class NerfstudioRunner:
     }
     _PREPROCESS_SCRIPT_NAME = "preprocess.py"
     _PREPROCESSED_DATASET_DIR_NAME = "preprocessed_dataset"
+    _COLMAP_REQUIRED_BASENAMES = ("cameras", "images", "points3D")
 
     def __init__(self) -> None:
         self.bin_name = str(getattr(settings, "NERFSTUDIO_BIN", "ns-train"))
@@ -211,23 +213,61 @@ class NerfstudioRunner:
 
         # Check for images in 'images/' subdirectory or in root
         images_dir = dataset_path / "images"
-        image_extensions = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr"}
-
-        images_found = []
+        images_found: list[Path] = []
         if images_dir.exists() and images_dir.is_dir():
-            images_found = [f for f in images_dir.iterdir() if f.suffix.lower() in image_extensions]
+            images_found = [f for f in images_dir.iterdir() if f.is_file() and f.suffix.lower() in self._IMAGE_EXTENSIONS]
 
         if not images_found:
             # Check in root directory as fallback
-            images_found = [f for f in dataset_path.iterdir() if f.is_file() and f.suffix.lower() in image_extensions]
+            images_found = [
+                f for f in dataset_path.iterdir() if f.is_file() and f.suffix.lower() in self._IMAGE_EXTENSIONS
+            ]
 
-        if not images_found:
-            raise ValueError(
-                f"Dataset contains no images. Checked: {images_dir} and root of {dataset_path}"
+        if images_found:
+            logger.info("[_validate_dataset_path] Dataset validated: %d local images found", len(images_found))
+            return
+
+        if self._has_valid_transforms_frame_paths(dataset_path):
+            logger.info(
+                "[_validate_dataset_path] Dataset validated via transforms.json frame file paths (no local images)."
             )
+            return
 
+        raise ValueError(
+            "Dataset contains no local images and no valid transforms.json frame file paths. "
+            f"Checked: {images_dir} and root of {dataset_path}"
+        )
 
-        logger.info("[_validate_dataset_path] Dataset validated: %d images found", len(images_found))
+    def _has_valid_transforms_frame_paths(self, dataset_path: Path) -> bool:
+        """Return True when transforms.json frames reference existing image files."""
+        transforms_path = dataset_path / self._NERFSTUDIO_TRANSFORMS_FILE
+        if not transforms_path.is_file():
+            return False
+
+        try:
+            payload = json.loads(transforms_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not parse transforms.json at %s: %s", transforms_path, exc)
+            return False
+
+        frames = payload.get("frames")
+        if not isinstance(frames, list) or not frames:
+            return False
+
+        valid_count = 0
+        for frame in frames:
+            if not isinstance(frame, dict):
+                continue
+            file_path_value = frame.get("file_path")
+            if not isinstance(file_path_value, str) or not file_path_value:
+                continue
+            frame_path = Path(file_path_value)
+            if not frame_path.is_absolute():
+                frame_path = (dataset_path / frame_path).resolve()
+            if frame_path.is_file() and frame_path.suffix.lower() in self._IMAGE_EXTENSIONS:
+                valid_count += 1
+
+        return valid_count > 0
 
     def _validate_pipeline_metadata(self, run: ExperimentRun, dataset_path: Path) -> None:
         """Validate pipeline-specific metadata; raise ValueError when required files are missing."""
@@ -247,6 +287,13 @@ class NerfstudioRunner:
                 message += (
                     " Found COLMAP layout (sparse/0), so convert it first with ns-process-data "
                     "to produce transforms.json."
+                )
+            elif (dataset_path / "sparse" / "0").is_dir():
+                missing = ", ".join(self._missing_colmap_files(dataset_path))
+                message += (
+                    " Found sparse/0 directory but COLMAP outputs are incomplete. "
+                    "Expected cameras/images/points3D (.bin or .txt). "
+                    f"Missing: {missing}."
                 )
             raise ValueError(message)
 
@@ -342,13 +389,21 @@ class NerfstudioRunner:
         if not preprocess_script.is_file():
             raise ValueError(f"Preprocess script not found: {preprocess_script}")
 
+        preprocess_input_path = self._resolve_preprocess_input_path(dataset_path)
         output_dataset_path = Path(run.output_dir) / self._PREPROCESSED_DATASET_DIR_NAME
-        skip_colmap = self._has_colmap_layout(dataset_path)
+        skip_colmap = self._has_colmap_layout(preprocess_input_path)
+        if not skip_colmap and (preprocess_input_path / "sparse" / "0").is_dir():
+            logger.warning(
+                "[Run %s] sparse/0 exists, but required COLMAP files are incomplete (%s). "
+                "Preprocess will run COLMAP instead of --skip-colmap.",
+                run.pk,
+                ", ".join(self._missing_colmap_files(preprocess_input_path)),
+            )
         command = [
             sys.executable,
             str(preprocess_script),
             "--input-dir",
-            str(dataset_path),
+            str(preprocess_input_path),
             "--output-dir",
             str(output_dataset_path),
         ]
@@ -358,7 +413,7 @@ class NerfstudioRunner:
         logger.info(
             "[Run %s] Running preprocess script: input=%s output=%s skip_colmap=%s",
             run.pk,
-            dataset_path,
+            preprocess_input_path,
             output_dataset_path,
             skip_colmap,
         )
@@ -387,6 +442,27 @@ class NerfstudioRunner:
         status = parsed_output.get("status", "created")
         return Path(str(data_dir)), str(status)
 
+    def _resolve_preprocess_input_path(self, dataset_path: Path) -> Path:
+        """Return dataset root for preprocess when caller points at ``images/`` directory."""
+        if dataset_path.name.lower() != "images":
+            return dataset_path
+
+        parent_path = dataset_path.parent
+        if not parent_path.is_dir():
+            return dataset_path
+
+        if (parent_path / "images").resolve() != dataset_path.resolve():
+            return dataset_path
+
+        if not (parent_path / "sparse" / "0").is_dir():
+            return dataset_path
+
+        logger.warning(
+            "Dataset path points to images/ but parent has sparse/0. Passing dataset root to preprocess: %s",
+            parent_path,
+        )
+        return parent_path
+
     def _parse_preprocess_output(self, stdout_text: str) -> dict[str, str]:
         """Parse preprocess script stdout as JSON result object."""
         stripped = stdout_text.strip()
@@ -414,9 +490,23 @@ class NerfstudioRunner:
         return all((dataset_path / file_name).is_file() for file_name in self._BLENDER_SPLIT_FILES)
 
     def _has_colmap_layout(self, dataset_path: Path) -> bool:
-        """Return True if COLMAP sparse reconstruction directory exists at sparse/0."""
+        """Return True when sparse/0 contains required COLMAP reconstruction files."""
         sparse_root = dataset_path / "sparse" / "0"
-        return sparse_root.is_dir()
+        if not sparse_root.is_dir():
+            return False
+
+        return not self._missing_colmap_files(dataset_path)
+
+    def _missing_colmap_files(self, dataset_path: Path) -> list[str]:
+        """Return missing required COLMAP file basenames from sparse/0."""
+        sparse_root = dataset_path / "sparse" / "0"
+        missing: list[str] = []
+        for base_name in self._COLMAP_REQUIRED_BASENAMES:
+            has_bin = (sparse_root / f"{base_name}.bin").is_file()
+            has_txt = (sparse_root / f"{base_name}.txt").is_file()
+            if not (has_bin or has_txt):
+                missing.append(base_name)
+        return missing
 
     def _has_nerfstudio_layout(self, dataset_path: Path) -> bool:
         """Return True if Nerfstudio metadata file exists in dataset root."""

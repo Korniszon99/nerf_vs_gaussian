@@ -256,7 +256,7 @@ class DatasetValidationTests(TestCase):
             with self.assertRaises(ValueError) as ctx:
                 self.runner._validate_dataset_path(run)
 
-            self.assertIn("no images", str(ctx.exception))
+            self.assertIn("no local images", str(ctx.exception))
 
     def test_validate_dataset_path_recognizes_various_image_formats(self) -> None:
         """Walidacja rozpoznaje różne formaty obrazów: jpg, png, tif, exr."""
@@ -360,6 +360,57 @@ class DatasetValidationTests(TestCase):
             )
 
             self.runner._validate_dataset_path(run)
+
+    def test_validate_dataset_path_accepts_preprocessed_without_local_images_when_frames_exist(self) -> None:
+        """Preprocessed dataset without local images should pass when frame paths point to existing files."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_dataset = tmp_path / "source"
+            source_image = source_dataset / "images" / "frame_001.jpg"
+            source_image.parent.mkdir(parents=True)
+            source_image.write_text("fake image")
+
+            preprocessed_dir = tmp_path / "preprocessed"
+            preprocessed_dir.mkdir(parents=True)
+            (preprocessed_dir / "transforms.json").write_text(
+                json.dumps({"frames": [{"file_path": str(source_image.resolve())}]}),
+                encoding="utf-8",
+            )
+            for file_name in self.runner._BLENDER_SPLIT_FILES:
+                (preprocessed_dir / file_name).write_text("{}", encoding="utf-8")
+
+            dataset = Dataset.objects.create(name="preprocessed-no-local-images", data_path=str(preprocessed_dir))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            )
+
+            self.runner._validate_dataset_path(run)
+
+    def test_validate_dataset_path_rejects_preprocessed_without_local_images_when_frames_missing(self) -> None:
+        """Preprocessed dataset should fail when transforms frame paths do not resolve to existing files."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            preprocessed_dir = tmp_path / "preprocessed"
+            preprocessed_dir.mkdir(parents=True)
+            (preprocessed_dir / "transforms.json").write_text(
+                json.dumps({"frames": [{"file_path": str(tmp_path / "missing" / "frame_001.jpg")}]})
+            )
+            for file_name in self.runner._BLENDER_SPLIT_FILES:
+                (preprocessed_dir / file_name).write_text("{}", encoding="utf-8")
+
+            dataset = Dataset.objects.create(name="preprocessed-missing-frames", data_path=str(preprocessed_dir))
+            run = ExperimentRun.objects.create(
+                name="test",
+                dataset=dataset,
+                pipeline_type=ExperimentRun.PipelineType.VANILLA_NERF,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                self.runner._validate_dataset_path(run)
+
+            self.assertIn("no local images", str(ctx.exception))
 
 
 class RunnerExecutionTests(TestCase):
@@ -598,6 +649,79 @@ class RunnerExecutionTests(TestCase):
         self.assertIn("Preprocess failed with exit code 1", str(ctx.exception))
         self.assertIn("stderr: [preprocess] ERROR: Error running command: ffmpeg", str(ctx.exception))
         self.assertIn("stdout: [preprocess] INFO: ns-process-data output:", str(ctx.exception))
+
+    @patch("experiments.services.runner.subprocess.run")
+    def test_run_preprocess_script_warns_on_incomplete_sparse_and_omits_skip_colmap(self, mock_run) -> None:
+        """Incomplete sparse/0 should emit warning and preprocess command must not include --skip-colmap."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            dataset_path = tmp_path / "dataset"
+            images_dir = dataset_path / "images"
+            sparse_zero = dataset_path / "sparse" / "0"
+            images_dir.mkdir(parents=True)
+            sparse_zero.mkdir(parents=True)
+            (images_dir / "frame_001.jpg").write_text("fake image")
+            (sparse_zero / "cameras.bin").write_bytes(b"partial")
+
+            self.run.output_dir = str(tmp_path / "run_output")
+            self.run.save(update_fields=["output_dir"])
+
+            preprocessed_path = tmp_path / "preprocessed"
+            mock_run.return_value = self._make_mock_completed_process(
+                json.dumps({"status": "created", "output_dir": str(preprocessed_path)}) + "\n",
+                "",
+                0,
+            )
+
+            runner = NerfstudioRunner()
+            with self.assertLogs("experiments.services.runner", level="WARNING") as captured_logs:
+                output_path, _status = runner._run_preprocess_script(self.run, dataset_path)
+
+        self.assertEqual(output_path, preprocessed_path)
+
+        preprocess_command = mock_run.call_args.args[0]
+        self.assertIn("preprocess.py", str(preprocess_command[1]))
+        self.assertNotIn("--skip-colmap", preprocess_command)
+
+        warning_text = "\n".join(captured_logs.output)
+        self.assertIn("sparse/0 exists, but required COLMAP files are incomplete", warning_text)
+        self.assertIn("images, points3D", warning_text)
+
+    @patch("experiments.services.runner.subprocess.run")
+    def test_run_preprocess_script_uses_dataset_root_when_input_points_to_images_and_parent_has_sparse(
+        self,
+        mock_run,
+    ) -> None:
+        """When dataset path is .../images and parent has sparse/0, preprocess command should use parent root."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            dataset_root = tmp_path / "dataset"
+            images_dir = dataset_root / "images"
+            sparse_zero = dataset_root / "sparse" / "0"
+            images_dir.mkdir(parents=True)
+            sparse_zero.mkdir(parents=True)
+            (images_dir / "frame_001.jpg").write_text("fake image")
+            for base_name in ("cameras", "images", "points3D"):
+                (sparse_zero / f"{base_name}.bin").write_bytes(b"ok")
+
+            self.run.output_dir = str(tmp_path / "run_output")
+            self.run.save(update_fields=["output_dir"])
+
+            preprocessed_path = tmp_path / "preprocessed"
+            mock_run.return_value = self._make_mock_completed_process(
+                json.dumps({"status": "created", "output_dir": str(preprocessed_path)}) + "\n",
+                "",
+                0,
+            )
+
+            runner = NerfstudioRunner()
+            with self.assertLogs("experiments.services.runner", level="WARNING") as captured_logs:
+                runner._run_preprocess_script(self.run, images_dir)
+
+        preprocess_command = mock_run.call_args.args[0]
+        input_index = preprocess_command.index("--input-dir") + 1
+        self.assertEqual(Path(preprocess_command[input_index]), dataset_root)
+        self.assertIn("Passing dataset root to preprocess", "\n".join(captured_logs.output))
 
     @patch("experiments.services.runner.subprocess.run")
     def test_run_calls_subprocess_with_utf8_decoding_and_utf8_env(self, mock_run) -> None:

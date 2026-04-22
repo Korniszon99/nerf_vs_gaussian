@@ -38,3 +38,4 @@ build/
 # Environment variables
 .env
 .env.*
+/gs_vs_nerf/_preprocess_staging/
