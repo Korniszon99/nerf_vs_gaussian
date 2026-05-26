@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -439,12 +440,28 @@ class RunnerExecutionTests(TestCase):
         proc.returncode = returncode
         return proc
 
+    def _make_mock_popen_process(
+        self,
+        stdout_content: str = "",
+        stderr_content: str = "",
+        returncode: int = 0,
+    ) -> MagicMock:
+        """Create a mock Popen-like object with stream handles for threaded readers."""
+        proc = MagicMock()
+        proc.stdout = io.StringIO(stdout_content)
+        proc.stderr = io.StringIO(stderr_content)
+        proc.returncode = returncode
+        proc.pid = 4242
+        proc.wait.return_value = returncode
+        proc.poll.return_value = None
+        return proc
+
     @patch("experiments.services.runner.collect_artifacts")
     @patch("experiments.services.runner.collect_metrics")
-    @patch("experiments.services.runner.subprocess.run")
-    def test_successful_run_marks_success(self, mock_run, mock_metrics, mock_artifacts) -> None:
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_successful_run_marks_success(self, mock_popen, mock_metrics, mock_artifacts) -> None:
         """Run zakończony kodem 0 -> status success, metryki i artefakty zbierane."""
-        mock_run.return_value = self._make_mock_completed_process("Training step 1\nTraining step 2\n", "", 0)
+        mock_popen.return_value = self._make_mock_popen_process("Training step 1\nTraining step 2\n", "", 0)
 
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
@@ -472,10 +489,10 @@ class RunnerExecutionTests(TestCase):
         self.assertIn("validation failed", result.error_message)
         self.assertIn("does not exist", result.stderr_log)
 
-    @patch("experiments.services.runner.subprocess.run")
-    def test_failed_run_marks_failed_and_keeps_stderr_message(self, mock_run) -> None:
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_failed_run_marks_failed_and_keeps_stderr_message(self, mock_popen) -> None:
         """Run zakończony kodem != 0 -> status failed i komunikat zawiera stderr."""
-        mock_run.return_value = self._make_mock_completed_process("", "Error: something went wrong\n", 2)
+        mock_popen.return_value = self._make_mock_popen_process("", "Error: something went wrong\n", 2)
 
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
@@ -484,13 +501,13 @@ class RunnerExecutionTests(TestCase):
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, ExperimentRun.Status.FAILED)
         self.assertIn("failed with exit code 2", self.run.error_message)
-        self.assertIn("stderr: Error: something went wrong", self.run.error_message)
+        self.assertIn("stderr: [stderr] Error: something went wrong", self.run.error_message)
         self.assertIn("Error: something went wrong", self.run.stderr_log)
 
-    @patch("experiments.services.runner.subprocess.run")
-    def test_missing_binary_marks_failed(self, mock_run) -> None:
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_missing_binary_marks_failed(self, mock_popen) -> None:
         """Brak ns-train binary (FileNotFoundError) -> status failed."""
-        mock_run.side_effect = FileNotFoundError("ns-train: command not found")
+        mock_popen.side_effect = FileNotFoundError("ns-train: command not found")
 
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
@@ -500,12 +517,12 @@ class RunnerExecutionTests(TestCase):
         self.assertEqual(self.run.status, ExperimentRun.Status.FAILED)
         self.assertIn("ns-train: command not found", self.run.error_message)
 
-    @patch("experiments.services.runner.subprocess.run")
-    def test_missing_dataset_path_still_launches_and_captures_process_error(self, mock_run) -> None:
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_missing_dataset_path_still_launches_and_captures_process_error(self, mock_popen) -> None:
         """Ścieżka datasetu jest tylko normalizowana dla komendy; błąd ma wrócić z procesu."""
         self.run.dataset.data_path = r"C:\missing\dataset"
         self.run.dataset.save(update_fields=["data_path"])
-        mock_run.return_value = self._make_mock_completed_process("", "Dataset missing\n", 2)
+        mock_popen.return_value = self._make_mock_popen_process("", "Dataset missing\n", 2)
 
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
@@ -519,24 +536,24 @@ class RunnerExecutionTests(TestCase):
         # Command should contain forward slash, not backslash (Windows compatibility)
         self.assertIn("C:/missing/dataset", self.run.command)
 
-    @patch("experiments.services.runner.subprocess.run")
-    def test_stdout_captured_in_log(self, mock_run) -> None:
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_stdout_captured_in_log(self, mock_popen) -> None:
         """Stdout procesu jest zapisywany w run.stdout_log."""
-        mock_run.return_value = self._make_mock_completed_process("line one\nline two\n", "", 1)
+        mock_popen.return_value = self._make_mock_popen_process("line one\nline two\n", "", 1)
 
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
             runner.run(self.run)
 
         self.run.refresh_from_db()
-        self.assertIn("line one", self.run.stdout_log)
-        self.assertIn("line two", self.run.stdout_log)
+        self.assertIn("[stdout] line one", self.run.stdout_log)
+        self.assertIn("[stdout] line two", self.run.stdout_log)
 
     @patch("experiments.services.runner.collect_artifacts")
     @patch("experiments.services.runner.collect_metrics")
-    @patch("experiments.services.runner.subprocess.run")
-    def test_run_persists_command_and_output_dir(self, mock_run, _mock_metrics, _mock_artifacts) -> None:
-        mock_run.return_value = self._make_mock_completed_process("done\n", "", 0)
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_run_persists_command_and_output_dir(self, mock_popen, _mock_metrics, _mock_artifacts) -> None:
+        mock_popen.return_value = self._make_mock_popen_process("done\n", "", 0)
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
             with patch.object(runner, "_resolve_binary", return_value=r"C:\tools\ns-train.exe"):
@@ -549,10 +566,12 @@ class RunnerExecutionTests(TestCase):
 
     @patch("experiments.services.runner.collect_artifacts")
     @patch("experiments.services.runner.collect_metrics")
+    @patch("experiments.services.runner.subprocess.Popen")
     @patch("experiments.services.runner.subprocess.run")
     def test_run_triggers_preprocess_and_uses_preprocessed_data_path(
         self,
         mock_run,
+        mock_popen,
         _mock_metrics,
         _mock_artifacts,
     ) -> None:
@@ -575,20 +594,19 @@ class RunnerExecutionTests(TestCase):
             preprocess_stdout = json.dumps(
                 {"status": "created", "data_dir": str(preprocessed_path)}
             ) + "\n"
-            mock_run.side_effect = [
-                self._make_mock_completed_process(preprocess_stdout, "", 0),
-                self._make_mock_completed_process("done\n", "", 0),
-            ]
+            mock_run.return_value = self._make_mock_completed_process(preprocess_stdout, "", 0)
+            mock_popen.return_value = self._make_mock_popen_process("done\n", "", 0)
 
             runner = NerfstudioRunner()
             runner.run(self.run)
 
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, ExperimentRun.Status.SUCCESS)
-        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_popen.call_count, 1)
 
         preprocess_command = mock_run.call_args_list[0].args[0]
-        train_command = mock_run.call_args_list[1].args[0]
+        train_command = mock_popen.call_args_list[0].args[0]
 
         self.assertIn("preprocess.py", str(preprocess_command[1]))
         data_index = train_command.index("--data") + 1
@@ -597,8 +615,9 @@ class RunnerExecutionTests(TestCase):
 
     @patch("experiments.services.runner.collect_artifacts")
     @patch("experiments.services.runner.collect_metrics")
+    @patch("experiments.services.runner.subprocess.Popen")
     @patch("experiments.services.runner.subprocess.run")
-    def test_run_skips_preprocess_when_metadata_exists(self, mock_run, _mock_metrics, _mock_artifacts) -> None:
+    def test_run_skips_preprocess_when_metadata_exists(self, mock_run, mock_popen, _mock_metrics, _mock_artifacts) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             dataset_path = tmp_path / "dataset"
@@ -611,18 +630,90 @@ class RunnerExecutionTests(TestCase):
             self.run.output_dir = str(tmp_path / "run_output")
             self.run.save(update_fields=["output_dir"])
 
-            mock_run.return_value = self._make_mock_completed_process("done\n", "", 0)
+            mock_popen.return_value = self._make_mock_popen_process("done\n", "", 0)
 
             runner = NerfstudioRunner()
             runner.run(self.run)
 
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, ExperimentRun.Status.SUCCESS)
-        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_run.call_count, 0)
+        self.assertEqual(mock_popen.call_count, 1)
 
-        train_command = mock_run.call_args_list[0].args[0]
+        train_command = mock_popen.call_args_list[0].args[0]
         self.assertIn("--data", train_command)
         self.assertNotIn("preprocess.py", " ".join(train_command))
+
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_run_sets_running_before_starting_process(self, mock_popen) -> None:
+        """Status powinien być ustawiony na running przed wywołaniem Popen."""
+
+        def _assert_running_before_start(*args, **kwargs):
+            self.run.refresh_from_db()
+            self.assertEqual(self.run.status, ExperimentRun.Status.RUNNING)
+            self.assertIsNotNone(self.run.started_at)
+            return self._make_mock_popen_process("", "", 0)
+
+        mock_popen.side_effect = _assert_running_before_start
+
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_validate_dataset_path"):
+            runner.run(self.run)
+
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_failed_run_with_cuda_oom_appends_hint(self, mock_popen) -> None:
+        """Błąd CUDA OOM powinien dopisać wskazówkę diagnostyczną do error_message."""
+        mock_popen.return_value = self._make_mock_popen_process("", "CUDA out of memory\n", 1)
+
+        runner = NerfstudioRunner()
+        with patch.object(runner, "_validate_dataset_path"):
+            runner.run(self.run)
+
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ExperimentRun.Status.FAILED)
+        self.assertIn("CUDA OOM", self.run.error_message)
+        self.assertIn("downscale_factor", self.run.error_message)
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", self.run.error_message)
+
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_run_flushes_logs_periodically(self, mock_popen) -> None:
+        """Runner powinien wykonywać wielokrotne flush-e logów podczas streamingu."""
+        mock_popen.return_value = self._make_mock_popen_process("line one\nline two\n", "warn one\n", 0)
+
+        runner = NerfstudioRunner()
+        runner._LOG_FLUSH_LINE_THRESHOLD = 1
+        with patch.object(runner, "_validate_dataset_path"):
+            with patch.object(runner, "_flush_logs_to_db", wraps=runner._flush_logs_to_db) as mocked_flush:
+                runner.run(self.run)
+
+        self.assertGreaterEqual(mocked_flush.call_count, 2)
+
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_run_flushes_logs_by_time_interval_when_line_threshold_not_reached(self, mock_popen) -> None:
+        """Regresja: flush po czasie powinien zadziałać nawet przy małej liczbie linii."""
+        mock_popen.return_value = self._make_mock_popen_process("line one\n", "", 0)
+
+        runner = NerfstudioRunner()
+        runner._LOG_FLUSH_LINE_THRESHOLD = 999
+        runner._LOG_FLUSH_INTERVAL_SEC = 0.0
+        with patch.object(runner, "_validate_dataset_path"):
+            with patch.object(runner, "_flush_logs_to_db", wraps=runner._flush_logs_to_db) as mocked_flush:
+                runner.run(self.run)
+
+        self.assertGreaterEqual(mocked_flush.call_count, 2)
+
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_run_writes_heartbeat_when_process_is_running(self, mock_popen) -> None:
+        """Regresja: stdout powinien zawierać heartbeat podczas aktywnego procesu."""
+        mock_popen.return_value = self._make_mock_popen_process("line one\n", "", 0)
+
+        runner = NerfstudioRunner()
+        runner._HEARTBEAT_INTERVAL_SEC = 0.0
+        with patch.object(runner, "_validate_dataset_path"):
+            runner.run(self.run)
+
+        self.run.refresh_from_db()
+        self.assertIn("[runner] heartbeat: still running", self.run.stdout_log)
 
     @patch("experiments.services.runner.subprocess.run")
     def test_run_preprocess_script_error_keeps_stdout_and_stderr_details(self, mock_run) -> None:
@@ -723,19 +814,20 @@ class RunnerExecutionTests(TestCase):
         self.assertEqual(Path(preprocess_command[input_index]), dataset_root)
         self.assertIn("Passing dataset root to preprocess", "\n".join(captured_logs.output))
 
-    @patch("experiments.services.runner.subprocess.run")
-    def test_run_calls_subprocess_with_utf8_decoding_and_utf8_env(self, mock_run) -> None:
-        """Regresja: subprocess.run musi dostać UTF-8 env oraz parametry dekodowania."""
-        mock_run.return_value = self._make_mock_completed_process("ok\n", "", 0)
+    @patch("experiments.services.runner.subprocess.Popen")
+    def test_run_calls_subprocess_with_utf8_decoding_and_utf8_env(self, mock_popen) -> None:
+        """Regresja: subprocess.Popen musi dostać UTF-8 env oraz parametry dekodowania."""
+        mock_popen.return_value = self._make_mock_popen_process("ok\n", "", 0)
 
         runner = NerfstudioRunner()
         with patch.object(runner, "_validate_dataset_path"):
             runner.run(self.run)
 
-        _args, kwargs = mock_run.call_args
+        _args, kwargs = mock_popen.call_args
         self.assertTrue(kwargs.get("text"))
         self.assertEqual(kwargs.get("encoding"), "utf-8")
         self.assertEqual(kwargs.get("errors"), "replace")
+        self.assertEqual(kwargs.get("bufsize"), 1)
 
         process_env = kwargs.get("env")
         self.assertIsInstance(process_env, dict)

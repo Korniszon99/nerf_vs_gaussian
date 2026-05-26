@@ -143,22 +143,32 @@
         <h2 class="h5 mb-0">Podgląd 3D (Point Cloud)</h2>
     </div>
     <div class="card-body">
-        {% if cloud_url %}
-            <div id="viewer" data-point-cloud-url="{{ cloud_url }}" style="width:100%; height:400px;"></div>
-        {% else %}
-            <p class="text-muted">Czekam na artefakt .ply...</p>
-        {% endif %}
+        <div id="viewer-panel" data-has-initial-cloud="{% if cloud_url %}1{% else %}0{% endif %}">
+            {% if cloud_url %}
+                <div id="viewer" data-point-cloud-url="{{ cloud_url }}" style="width:100%; height:400px;"></div>
+            {% else %}
+                <p class="text-muted mb-0">Czekam na artefakt .ply...</p>
+            {% endif %}
+        </div>
     </div>
 </div>
 
 <script type="module">
+    import { initPointCloudViewer } from "{% static 'experiments/js/viewer.js' %}";
+
     const logsUrl = "{% url 'experiments:run_logs_json' run.pk %}";
+    const artifactsUrl = "{% url 'experiments:run_artifacts_json' run.pk %}";
     const statusBadge = document.getElementById('run-status-badge');
     const statusSpinner = document.getElementById('run-status-spinner');
     const stdoutEl = document.getElementById('stdout-log');
     const stderrEl = document.getElementById('stderr-log');
     const durationEl = document.getElementById('run-duration');
     const errorMsgEl = document.getElementById('run-error-message');
+    const viewerPanel = document.getElementById('viewer-panel');
+    const hasInitialCloud = viewerPanel?.dataset.hasInitialCloud === '1';
+    let viewerResolved = hasInitialCloud;
+    let artifactPollAttempts = 0;
+    const maxArtifactPollAttempts = 8;
 
     function alertClassForStatus(status) {
         if (status === 'success') return 'alert alert-success';
@@ -183,6 +193,78 @@
         if (alertEl) alertEl.className = alertClassForStatus(status);
     }
 
+    function findCloudArtifact(artifacts) {
+        return artifacts.find((artifact) => {
+            const source = (artifact.url || artifact.path || '').toLowerCase();
+            return source.endsWith('.ply') || source.endsWith('.splat');
+        });
+    }
+
+    function renderViewerMessage(message, tone = 'muted') {
+        if (!viewerPanel) return;
+        if (tone === 'info') {
+            viewerPanel.innerHTML = `<div class="alert alert-info mb-0" role="alert">${message}</div>`;
+            return;
+        }
+        viewerPanel.innerHTML = `<p class="text-muted mb-0">${message}</p>`;
+    }
+
+    function renderViewerFromArtifact(artifact) {
+        if (!viewerPanel) return;
+        const source = artifact.url || artifact.path || '';
+        const extension = source.split('.').pop()?.toLowerCase();
+
+        if (extension === 'splat') {
+            renderViewerMessage(
+                'Aktualny viewer obsluguje tylko render .ply. Dodaj konwersje artefaktu do .ply po treningu.',
+                'info',
+            );
+            viewerResolved = true;
+            return;
+        }
+
+        if (extension === 'ply' && artifact.url) {
+            viewerPanel.innerHTML = '<div id="viewer" style="width:100%; height:400px;"></div>';
+            const viewerEl = viewerPanel.querySelector('#viewer');
+            if (viewerEl) {
+                viewerEl.dataset.pointCloudUrl = artifact.url;
+                initPointCloudViewer(viewerEl, artifact.url);
+                viewerResolved = true;
+            }
+        }
+    }
+
+    async function hydrateViewerFromArtifacts() {
+        if (!viewerPanel || viewerResolved) return;
+
+        try {
+            const response = await fetch(artifactsUrl);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
+            const cloudArtifact = findCloudArtifact(artifacts);
+
+            if (!cloudArtifact) {
+                if (artifactPollAttempts < maxArtifactPollAttempts) {
+                    artifactPollAttempts += 1;
+                    renderViewerMessage('Run zakonczony. Czekam na artefakty .ply/.splat...');
+                    setTimeout(hydrateViewerFromArtifacts, 2000);
+                }
+                return;
+            }
+
+            renderViewerFromArtifact(cloudArtifact);
+        } catch (err) {
+            console.error('Blad pobierania artefaktow:', err);
+            if (artifactPollAttempts < maxArtifactPollAttempts) {
+                artifactPollAttempts += 1;
+                setTimeout(hydrateViewerFromArtifacts, 2000);
+            }
+        }
+    }
+
     function refreshLogs() {
         fetch(logsUrl)
             .then(r => r.json())
@@ -194,6 +276,9 @@
                 }
                 if (data.status) {
                     renderStatus(data.status);
+                    if (data.status === 'success') {
+                        hydrateViewerFromArtifacts();
+                    }
                 }
                 if (errorMsgEl && data.error_message !== undefined) {
                     errorMsgEl.textContent = data.error_message || '';
@@ -218,8 +303,8 @@
 
     if (statusBadge.dataset.runStatus === 'pending' || statusBadge.dataset.runStatus === 'running') {
         refreshLogs();
+    } else if (statusBadge.dataset.runStatus === 'success' && !hasInitialCloud) {
+        hydrateViewerFromArtifacts();
     }
 </script>
-
-<script type="module" src="{% static 'experiments/js/viewer.js' %}"></script>
 {% endblock %}

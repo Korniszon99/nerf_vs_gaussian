@@ -2,16 +2,51 @@ import * as THREE from "https://unpkg.com/three@0.170.0/build/three.module.js";
 import { OrbitControls } from "https://unpkg.com/three@0.170.0/examples/jsm/controls/OrbitControls.js";
 import { PLYLoader } from "https://unpkg.com/three@0.170.0/examples/jsm/loaders/PLYLoader.js";
 
-const container = document.getElementById("viewer");
+const ACTIVE_VIEWERS = new WeakMap();
 
-if (!container) {
-    throw new Error("Brak elementu #viewer");
+function renderMessage(container, message, tone = "info") {
+    const toneClass = tone === "danger" ? "alert-danger" : tone === "warning" ? "alert-warning" : "alert-info";
+    container.innerHTML = `<div class="alert ${toneClass} mb-0" role="alert">${message}</div>`;
 }
 
-const cloudUrl = container.dataset.pointCloudUrl;
-if (!cloudUrl) {
-    container.innerHTML = "<p style='color:#fff;padding:8px'>Brak pliku chmury punktów w artefaktach.</p>";
-} else {
+/**
+ * Inicjalizuje viewer .ply dla wskazanego elementu lub selektora.
+ * @param {HTMLElement|string} containerOrSelector
+ * @param {string=} explicitCloudUrl
+ */
+export function initPointCloudViewer(containerOrSelector, explicitCloudUrl) {
+    const container =
+        typeof containerOrSelector === "string"
+            ? document.querySelector(containerOrSelector)
+            : containerOrSelector;
+
+    if (!container) {
+        return null;
+    }
+
+    if (ACTIVE_VIEWERS.has(container)) {
+        ACTIVE_VIEWERS.get(container)();
+    }
+
+    const cloudUrl = explicitCloudUrl || container.dataset.pointCloudUrl;
+    if (!cloudUrl) {
+        renderMessage(container, "Brak pliku chmury punktow w artefaktach.");
+        return null;
+    }
+
+    const ext = cloudUrl.split(".").pop()?.toLowerCase();
+    if (ext !== "ply") {
+        renderMessage(
+            container,
+            "Aktualny viewer obsluguje tylko render .ply. Dodaj konwersje artefaktu do .ply po treningu.",
+            "warning",
+        );
+        return null;
+    }
+
+    container.innerHTML = "";
+    container.classList.add("position-relative", "bg-dark", "rounded");
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0e1111);
 
@@ -31,22 +66,21 @@ if (!cloudUrl) {
     const grid = new THREE.GridHelper(4, 20, 0x666666, 0x333333);
     scene.add(grid);
 
-    const ext = cloudUrl.split(".").pop()?.toLowerCase();
-    if (ext !== "ply") {
-        container.insertAdjacentHTML(
-            "beforeend",
-            "<p style='position:absolute;color:#fff;padding:8px'>Aktualny viewer obsługuje render .ply. Dodaj konwersję artefaktu do .ply po treningu.</p>",
-        );
-    } else {
-        const loader = new PLYLoader();
-        loader.load(cloudUrl, (geometry) => {
+    const loader = new PLYLoader();
+    loader.load(
+        cloudUrl,
+        (geometry) => {
             geometry.computeVertexNormals();
             geometry.center();
             const material = new THREE.PointsMaterial({ size: 0.01, color: 0x74b9ff });
             const points = new THREE.Points(geometry, material);
             scene.add(points);
-        });
-    }
+        },
+        undefined,
+        () => {
+            renderMessage(container, "Nie udalo sie zaladowac pliku .ply.", "danger");
+        },
+    );
 
     const animate = () => {
         requestAnimationFrame(animate);
@@ -55,12 +89,27 @@ if (!cloudUrl) {
     };
     animate();
 
-    window.addEventListener("resize", () => {
+    const onResize = () => {
         const width = container.clientWidth;
         const height = container.clientHeight;
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
         renderer.setSize(width, height);
-    });
+    };
+    window.addEventListener("resize", onResize);
+
+    const teardown = () => {
+        window.removeEventListener("resize", onResize);
+        controls.dispose();
+        renderer.dispose();
+        container.innerHTML = "";
+        ACTIVE_VIEWERS.delete(container);
+    };
+    ACTIVE_VIEWERS.set(container, teardown);
+    return teardown;
 }
 
+// Backward compatibility: automatyczna inicjalizacja przy pierwszym renderze #viewer.
+if (document.getElementById("viewer")) {
+    initPointCloudViewer("#viewer");
+}

@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
-import tempfile
+import threading
+import time
 from pathlib import Path
 from shutil import which
-from typing import cast
+from typing import IO
 
 from django.conf import settings
 from django.utils import timezone
@@ -35,6 +37,14 @@ class NerfstudioRunner:
     _PREPROCESS_SCRIPT_NAME = "preprocess.py"
     _PREPROCESSED_DATASET_DIR_NAME = "preprocessed_dataset"
     _COLMAP_REQUIRED_BASENAMES = ("cameras", "images", "points3D")
+    _LOG_FLUSH_LINE_THRESHOLD = 20
+    _LOG_FLUSH_INTERVAL_SEC = 1.0
+    _HEARTBEAT_INTERVAL_SEC = 15.0
+    _OOM_HINT = (
+        "Detected possible CUDA OOM. Try reducing batch/workload with config values such as "
+        "downscale_factor or max_num_iterations, and consider setting "
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True."
+    )
 
     def __init__(self) -> None:
         self.bin_name = str(getattr(settings, "NERFSTUDIO_BIN", "ns-train"))
@@ -69,59 +79,126 @@ class NerfstudioRunner:
 
         command = self._ns_train_args_for_dataset(run, str(prepared_dataset_path))
         run.command = self._command_to_string(command)
-        run.stdout_log = ""
+        run.stdout_log = f"[runner] preparing launch for run={run.pk}\n"
         run.stderr_log = ""
         run.error_message = ""
-        run.save(update_fields=["output_dir", "command", "stdout_log", "stderr_log", "error_message"])
+        run.mark_running()
+        run.save(
+            update_fields=[
+                "output_dir",
+                "command",
+                "stdout_log",
+                "stderr_log",
+                "error_message",
+                "status",
+                "started_at",
+            ]
+        )
 
         logger.info("[Run %s] Launching: %s", run.pk, run.command)
 
         process_env = self._build_process_env()
+        stdout_chunks: list[str] = [run.stdout_log]
+        stderr_chunks: list[str] = []
+        stream_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        active_streams = 0
+        processed_lines_since_flush = 0
+        last_flush_at = time.monotonic()
+        last_heartbeat_at = last_flush_at
 
-        with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".stdout") as stdout_file:
-            with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".stderr") as stderr_file:
-                stdout_path = Path(stdout_file.name)
-                stderr_path = Path(stderr_file.name)
-
-        completed_process: subprocess.CompletedProcess[str] | None = None
+        process: subprocess.Popen[str] | None = None
+        stdout_thread: threading.Thread | None = None
+        stderr_thread: threading.Thread | None = None
         try:
-            completed_process = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=str(Path(run.output_dir).parent),
                 env=process_env,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                capture_output=True,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=1,
             )
+            stdout_chunks.append(f"[runner] process started pid={process.pid}\n")
+
+            if process.stdout is not None:
+                active_streams += 1
+                stdout_thread = threading.Thread(
+                    target=self._stream_pipe_lines,
+                    args=("stdout", process.stdout, stream_queue),
+                    daemon=True,
+                )
+                stdout_thread.start()
+
+            if process.stderr is not None:
+                active_streams += 1
+                stderr_thread = threading.Thread(
+                    target=self._stream_pipe_lines,
+                    args=("stderr", process.stderr, stream_queue),
+                    daemon=True,
+                )
+                stderr_thread.start()
+
+            while active_streams > 0:
+                try:
+                    stream_name, raw_line = stream_queue.get(timeout=0.2)
+                except queue.Empty:
+                    stream_name, raw_line = "", None
+
+                now = time.monotonic()
+                if raw_line is None:
+                    if stream_name:
+                        active_streams -= 1
+                else:
+                    prefixed_line = self._format_stream_line(stream_name, raw_line)
+                    if stream_name == "stdout":
+                        stdout_chunks.append(prefixed_line)
+                    else:
+                        stderr_chunks.append(prefixed_line)
+                    processed_lines_since_flush += 1
+
+                if process.poll() is None and now - last_heartbeat_at >= self._HEARTBEAT_INTERVAL_SEC:
+                    heartbeat = f"[runner] heartbeat: still running at {timezone.now().isoformat()}\n"
+                    stdout_chunks.append(heartbeat)
+                    processed_lines_since_flush += 1
+                    last_heartbeat_at = now
+
+                if self._should_flush_logs(processed_lines_since_flush, last_flush_at, now):
+                    self._flush_logs_to_db(run, stdout_chunks, stderr_chunks)
+                    processed_lines_since_flush = 0
+                    last_flush_at = now
+
+            returncode = process.wait()
+
+            # Final snapshot to persist trailing buffers after process exit.
+            self._flush_logs_to_db(run, stdout_chunks, stderr_chunks)
         except Exception as exc:
             error_msg = f"Exception during process start: {exc}"
             logger.exception("[Run %s] %s", run.pk, error_msg)
             run.mark_finished(success=False, error_message=error_msg)
-            run.stderr_log = error_msg
+            run.stdout_log = "".join(stdout_chunks)
+            run.stderr_log = "\n".join([line for line in ["".join(stderr_chunks), error_msg] if line])
             run.finished_at = timezone.now()
-            run.save(update_fields=["status", "stderr_log", "finished_at", "error_message"])
-            stdout_path.unlink(missing_ok=True)
-            stderr_path.unlink(missing_ok=True)
+            run.save(update_fields=["status", "stdout_log", "stderr_log", "finished_at", "error_message"])
             return run
+        finally:
+            if process is not None:
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
 
-        run.mark_running()
-        run.save(update_fields=["status", "started_at", "error_message"])
+            if stdout_thread is not None:
+                stdout_thread.join(timeout=0.5)
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=0.5)
 
-        stdout_text = completed_process.stdout or ""
-        stderr_text = completed_process.stderr or ""
-        stdout_path.write_text(stdout_text, encoding="utf-8", errors="replace")
-        stderr_path.write_text(stderr_text, encoding="utf-8", errors="replace")
-
-        returncode = completed_process.returncode
-
-        stdout_log = self._read_text(stdout_path)
-        stderr_log = self._read_text(stderr_path)
-        if stdout_log:
-            run.stdout_log = stdout_log
-        if stderr_log:
-            run.stderr_log = stderr_log
+        stdout_log = "".join(stdout_chunks)
+        stderr_log = "".join(stderr_chunks)
+        run.stdout_log = stdout_log
+        run.stderr_log = stderr_log
 
         logger.info("[Run %s] Process finished with code: %s", run.pk, returncode)
 
@@ -138,6 +215,7 @@ class NerfstudioRunner:
                 logger.exception("[Run %s] Error collecting artifacts: %s", run.pk, exc)
         else:
             error_message = self._build_failure_message(returncode, stderr_log)
+            error_message = self._append_oom_hint_if_needed(error_message, stderr_log)
             run.mark_finished(success=False, error_message=error_message)
             logger.error("[Run %s] Error: %s", run.pk, run.error_message)
 
@@ -152,13 +230,53 @@ class NerfstudioRunner:
             ]
         )
 
-        stdout_path.unlink(missing_ok=True)
-        stderr_path.unlink(missing_ok=True)
-
         elapsed = (run.finished_at - run.started_at).total_seconds() if run.started_at and run.finished_at else 0
         Metric.objects.create(run=run, name="duration_sec", value=elapsed, step=0)
         logger.info("[Run %s] Completed in %.1fs", run.pk, elapsed)
         return run
+
+    def _stream_pipe_lines(
+        self,
+        stream_name: str,
+        stream: IO[str],
+        output_queue: queue.Queue[tuple[str, str | None]],
+    ) -> None:
+        """Read process output line-by-line and pass it to a shared queue."""
+        try:
+            for line in iter(stream.readline, ""):
+                output_queue.put((stream_name, line))
+        finally:
+            output_queue.put((stream_name, None))
+
+    def _format_stream_line(self, stream_name: str, line: str) -> str:
+        """Return a stream line annotated with a stable log prefix."""
+        normalized = line.rstrip("\r\n")
+        return f"[{stream_name}] {normalized}\n"
+
+    def _should_flush_logs(self, lines_since_flush: int, last_flush_at: float, now: float) -> bool:
+        """Decide whether in-memory logs should be persisted to DB."""
+        if lines_since_flush >= self._LOG_FLUSH_LINE_THRESHOLD:
+            return True
+        return (now - last_flush_at) >= self._LOG_FLUSH_INTERVAL_SEC and lines_since_flush > 0
+
+    def _flush_logs_to_db(self, run: ExperimentRun, stdout_chunks: list[str], stderr_chunks: list[str]) -> None:
+        """Persist current stdout/stderr snapshot so log endpoints can stream progress."""
+        run.stdout_log = "".join(stdout_chunks)
+        run.stderr_log = "".join(stderr_chunks)
+        run.save(update_fields=["stdout_log", "stderr_log"])
+
+    def _append_oom_hint_if_needed(self, error_message: str, stderr_log: str) -> str:
+        """Append CUDA OOM guidance when stderr indicates GPU memory exhaustion."""
+        lowered = stderr_log.lower()
+        oom_signatures = (
+            "cuda out of memory",
+            "cuda error: out of memory",
+            "cublas_status_alloc_failed",
+            "out of memory",
+        )
+        if any(signature in lowered for signature in oom_signatures):
+            return f"{error_message}. {self._OOM_HINT}"
+        return error_message
 
     def _prepare_dataset_for_run(self, run: ExperimentRun) -> Path:
         """Validate dataset and auto-generate missing metadata when possible."""
