@@ -64,12 +64,6 @@ class DatasetForm(forms.ModelForm):
             )
 
         # Ostrzeżenie o znakach diakrytycznych (ale form przechodzi)
-        if self._has_diacritics(folder_str):
-            self.add_error(None, forms.ValidationError(
-                "⚠️ Ścieżka zawiera znaki diakrytyczne — upewnij się, że shell je obsługuje",
-                code="diacritics_warning",
-            ))
-
         return str(path)
 
     @staticmethod
