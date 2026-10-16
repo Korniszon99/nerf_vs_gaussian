@@ -63,7 +63,7 @@ def import_images_from_folder(dataset: Dataset) -> dict[str, int | list[str]]:
 
     # Pobierz aktualny maksymalny indeks
     max_index = dataset.images.aggregate(max_idx=Max("frame_index"))["max_idx"]
-    next_index = (max_index or -1) + 1
+    next_index = (max_index if max_index is not None else -1) + 1
 
     for image_path in image_files:
         try:
