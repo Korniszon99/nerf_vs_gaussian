@@ -60,8 +60,13 @@ Set `DJANGO_DEBUG=0`, a strong random `DJANGO_SECRET_KEY`, explicit `DJANGO_ALLO
 
 The in-process `ThreadPoolExecutor` is not a durable job queue: restarts may interrupt work, and multiple web workers do not share scheduling state. Before a multi-user or unattended deployment, add a dedicated GPU worker with a persistent queue, quotas, cancellation, concurrency controls and recovery. Dataset paths refer to the host filesystem, so this interface belongs behind trusted operator access.
 
+## Reproducible experiment plan
+
+The [evaluation protocol](docs/evaluation-protocol.md) defines the next experiment. Copy the [experiment record](docs/experiment-template.md) for each real run. These are planning documents, not measured results.
+
 ## Portfolio evidence to add
 
 Publish the same train/test split for both pipelines, dataset provenance, image count/resolution, preprocessing settings, software versions, GPU/VRAM, training budget and repeated-run variability. Report held-out PSNR/SSIM/LPIPS alongside training time, memory and visual failure cases. Training log metrics alone are insufficient for a fair quality comparison.
 
 Include a short side-by-side reconstruction video and a reproducible run configuration before presenting this as a completed benchmark. [Security notes](SECURITY.md).
+
